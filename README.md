@@ -231,13 +231,13 @@ gws-mcp/
 .venv/bin/python -m unittest discover tests
 ```
 
-手動で通信を確認する場合:
+手動で通信を確認する場合（MCP プロトコル `2026-07-28`。各リクエストの `_meta` にバージョンを付ける）:
 
 ```sh
+META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
 printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}' \
-  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$META}}" \
+  "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{$META}}" \
   | .venv/bin/python -m gws_mcp
 ```
 
