@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+credentials.json
+token.json
+client_secret*.json
+
+## AGENTS
+AGENTS.md
+AGENTS.local.md
+CLAUDE.md
+CLAUDE.local.md
