@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from gws_mcp.auth import AuthError
-from gws_mcp.server import PROTOCOL_VERSION, MCPServer, serve
+from gws_mcp.server import LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, MCPServer, serve
 from gws_mcp.tools import Tool, ToolError, register
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,12 +91,6 @@ class HandleTest(unittest.TestCase):
         del m["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
         self.assertEqual(self.server.handle(m)["error"]["code"], -32602)
 
-    def test_旧方式のinitializeは対応版を示して拒否する(self):
-        r = self.server.handle(
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}
-        )
-        self.assertEqual(r["error"]["code"], -32601)
-        self.assertIn(PROTOCOL_VERSION, r["error"]["message"])
 
     # ---- tools/list ----
 
@@ -191,6 +185,73 @@ class HandleTest(unittest.TestCase):
     def test_paramsが配列(self):
         r = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": []})
         self.assertEqual(r["error"]["code"], -32602)
+
+
+def legacy(id_, method, params=None):
+    """旧方式（_meta 無し）のリクエストを作る。"""
+    m = {"jsonrpc": "2.0", "id": id_, "method": method}
+    if params is not None:
+        m["params"] = params
+    return m
+
+
+INITIALIZE = legacy(
+    0,
+    "initialize",
+    {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "old", "version": "1"}},
+)
+
+
+class LegacyTest(unittest.TestCase):
+    """旧方式（initialize によるハンドシェイク）のテスト。"""
+
+    def setUp(self):
+        self.server = make_server()
+
+    def test_initializeで旧方式の版を返す(self):
+        r = self.server.handle(INITIALIZE)["result"]
+        self.assertEqual(r["protocolVersion"], LEGACY_PROTOCOL_VERSION)
+        self.assertEqual(r["capabilities"], {"tools": {"listChanged": False}})
+        self.assertEqual(r["serverInfo"]["name"], "gws-mcp")
+        self.assertNotIn("resultType", r)
+
+    def test_未対応の版を要求されても自分の版を返す(self):
+        m = legacy(0, "initialize", {"protocolVersion": "2024-01-01", "capabilities": {}})
+        self.assertEqual(self.server.handle(m)["result"]["protocolVersion"], LEGACY_PROTOCOL_VERSION)
+
+    def test_initialize後はmetaなしで使える(self):
+        self.server.handle(INITIALIZE)
+        self.assertIsNone(self.server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        self.assertEqual(self.server.handle(legacy(1, "ping"))["result"], {})
+        tools = self.server.handle(legacy(2, "tools/list"))["result"]
+        self.assertEqual(len(tools["tools"]), 5)
+        self.assertNotIn("resultType", tools)
+        r = self.server.handle(legacy(3, "tools/call", {"name": "echo", "arguments": {"text": "hi"}}))["result"]
+        self.assertFalse(r["isError"])
+        self.assertIn("hi", r["content"][0]["text"])
+
+    def test_旧方式でもガード拒否はツールエラー(self):
+        self.server.handle(INITIALIZE)
+        r = self.server.handle(legacy(1, "tools/call", {"name": "guarded", "arguments": {}}))["result"]
+        self.assertTrue(r["isError"])
+
+    def test_旧方式でも引数は検証する(self):
+        self.server.handle(INITIALIZE)
+        r = self.server.handle(legacy(1, "tools/call", {"name": "echo", "arguments": {"text": 1}}))["result"]
+        self.assertTrue(r["isError"])
+
+    def test_initialize前はmetaが必須(self):
+        r = self.server.handle(legacy(1, "tools/list"))
+        self.assertEqual(r["error"]["code"], -32602)
+
+    def test_initialize後もmeta付きは新方式で処理する(self):
+        self.server.handle(INITIALIZE)
+        r = self.server.handle(req(1, "tools/list"))["result"]
+        self.assertEqual(r["resultType"], "complete")
+
+    def test_旧方式に無いメソッド(self):
+        self.server.handle(INITIALIZE)
+        self.assertEqual(self.server.handle(legacy(1, "resources/list"))["error"]["code"], -32601)
 
 
 class ServeTest(unittest.TestCase):

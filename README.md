@@ -5,6 +5,7 @@
 LLM の誤操作による意図しない変更・削除・情報流出を防ぐための制限をコード側で強制します。
 
 - 外部依存は **Google 公式ライブラリのみ**です。サードパーティ製フレームワークは使いません。
+- MCP プロトコルは新方式（`2026-07-28`、リクエストごとにバージョンを付ける方式）と旧方式（`2025-11-25`、最初に `initialize` で接続する方式）の両方に対応します。Claude Code は段階的に新方式へ移行中で、現在は多くの場合旧方式で接続します（環境変数 `MCP_PROTOCOL_NEGOTIATION=auto` を付けると新方式を試します）。
 
 ## 対応サービスと操作範囲
 
@@ -19,7 +20,7 @@ LLM の誤操作による意図しない変更・削除・情報流出を防ぐ�
 | Gmail                 |    ✅    |  ❌  |  ❌   |  ❌  |
 
 ※1 対象は「**自分が所有者**」かつ「**共有ドライブに属していない（`driveId` がない）**」ファイルだけです。どちらかを満たさないファイルへの書き込みは拒否します。
-※2 自分が主催者の予定だけ更新できます。
+※2 作成・更新できるのは自分のメインカレンダー（primary）だけです。更新は自分が主催者の予定に限ります。
 
 ## セキュリティ設計
 
@@ -30,10 +31,13 @@ LLM の誤操作による意図しない変更・削除・情報流出を防ぐ�
 - `driveId` がある（共有ドライブ内のファイル）
 - `ownedByMe` が `true` でない（他人が所有するファイル）
 - ゴミ箱に入っている
+- ショートカットである（リンク先が共有ドライブのファイルかどうかを ID から判別できないため）
 
 新規作成では、作成先の親フォルダに同じ判定をかけます（既定の作成先はマイドライブ直下）。ファイル ID は形式をチェックしてから使います。
 
 OAuth スコープではマイドライブと共有ドライブを区別できないため、この制限はスコープではなくコード（[gws_mcp/guard.py](gws_mcp/guard.py)）で強制しています。
+
+さらに Drive API の書き込み呼び出し（作成・更新・名前変更）には `supportsAllDrives` を付けません。付けなければ共有ドライブのファイルは API 側で「見つからない」扱いになるため、ガードとは別の二重の防御になります（共有ドライブのファイルを読むために必要なコピーだけは例外で、コピー先はガードで判定します）。
 
 ### ツールとして公開しない操作
 
@@ -48,7 +52,7 @@ OAuth スコープではマイドライブと共有ドライブを区別でき�
 ### その他の安全策
 
 - **スプレッドシート**: 書き込みは既定で `RAW`（数式として解釈しない）です。`IMPORTDATA` などの数式でデータが外部に送られるのを防ぎます。数式を入れたいときだけ `USER_ENTERED` を明示します。
-- **カレンダー**: 予定を作成・更新しても、既定では招待メールを送りません（`sendUpdates="none"`）。
+- **カレンダー**: 予定を作成・更新しても、既定では招待メールを送りません（`sendUpdates="none"`）。書き込み先は自分のメインカレンダーに固定しており、共有カレンダーは編集権限があっても変更しません。
 - **トークン**: 権限 `0600` で保存します（ディレクトリは `0700`）。サーバー実行中にブラウザ認証を始めることはありません。
 - **ログ**: 標準エラー出力だけに出します（stdout は MCP 通信専用）。
 
@@ -100,13 +104,13 @@ python3 -m venv .venv
 
 #### 依存の固定（推奨）
 
-`requirements.txt` で固定しているのは公式4パッケージのバージョンだけです。推移的な依存までハッシュ付きで固定する場合は、初回インストール後に次を実行します。
+`requirements.txt` で固定しているのは公式4パッケージのバージョンだけです。推移的な依存まで動作確認済みのバージョンで入れる場合は `requirements.lock` を使います。
 
 ```sh
-.venv/bin/pip freeze > requirements.lock
-# 以降の再インストールでは requirements.lock を使う
-.venv/bin/pip install --require-hashes -r requirements.lock  # ハッシュを付けた場合
+.venv/bin/pip install -r requirements.lock
 ```
+
+依存を更新したときは `.venv/bin/pip freeze > requirements.lock` で作り直します。
 
 ### 3. 初回認証
 
@@ -118,15 +122,15 @@ python3 -m venv .venv
 
 ### 4. MCP クライアントへの登録
 
-`/path/to/gws-mcp` は実際のパスに置き換えてください。[config/](config/) に設定例があります。
+`/path/to/gws-mcp` は実際のパスに置き換えてください。[config/](config/) に設定例があります（Claude Code のプロジェクト設定 `.mcp.json` 用: [claude-code.mcp.example.json](config/claude-code.mcp.example.json)、VS Code 用: [vscode.mcp.example.json](config/vscode.mcp.example.json)）。
 
 **Claude Code**
 
 ```sh
-claude mcp add gws -- /path/to/gws-mcp/.venv/bin/python -m gws_mcp
+claude mcp add --scope user gws -e PYTHONPATH=/path/to/gws-mcp -- /path/to/gws-mcp/.venv/bin/python -m gws_mcp
 ```
 
-（プロジェクト外から使う場合は `-e PYTHONPATH=/path/to/gws-mcp` を付けます）
+（`--scope user` でどのプロジェクトからも使えるようにします。`PYTHONPATH` はリポジトリ外から起動しても `gws_mcp` を読み込めるようにするためです）
 
 **VS Code**（`.vscode/mcp.json`）
 
@@ -171,11 +175,11 @@ claude mcp add gws -- /path/to/gws-mcp/.venv/bin/python -m gws_mcp
 ### カレンダー
 
 | ツール                  | 種別 | 説明                         |
-| ----------------------- | ---- | ---------------------------- |
-| `calendar_list_events`  | 読取 | 期間・キーワードで予定を一覧 |
-| `calendar_get_event`    | 読取 | 予定の詳細を取得             |
-| `calendar_create_event` | 書込 | 予定を作成                   |
-| `calendar_update_event` | 書込 | 自分が主催者の予定を部分更新 |
+| ----------------------- | ---- | ---------------------------------- |
+| `calendar_list_events`  | 読取 | 期間・キーワードで予定を一覧       |
+| `calendar_get_event`    | 読取 | 予定の詳細を取得                   |
+| `calendar_create_event` | 書込 | 自分のメインカレンダーに予定を作成 |
+| `calendar_update_event` | 書込 | 自分が主催者の予定を部分更新       |
 
 ### スプレッドシート
 
@@ -215,7 +219,7 @@ gws-mcp/
 │   ├── schema.py      # ツール入力の検証
 │   ├── auth.py        # OAuth 資格情報の読み込み・更新
 │   ├── guard.py       # 書き込みガード（マイドライブ判定）
-│   └── tools/         # サービスごとのツール実装
+│   └── tools/         # サービスごとのツール実装（drive / gmail / calendar / sheets / docs / slides）
 ├── scripts/
 │   └── authorize.py   # 初回 OAuth 認証
 ├── tests/             # unittest（Google API はモック）

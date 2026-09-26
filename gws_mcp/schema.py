@@ -25,7 +25,8 @@ _SUPPORTED_KEYWORDS = {
     "maxItems",
 }
 
-_TYPES = {"object", "string", "integer", "number", "boolean", "array"}
+_SCALAR_TYPES = {"string", "integer", "number", "boolean"}
+_TYPES = _SCALAR_TYPES | {"object", "array"}
 
 
 class SchemaError(ValueError):
@@ -42,6 +43,11 @@ def check_schema(schema: dict, path: str = "$") -> None:
     if unknown:
         raise ValueError(f"{path}: 未対応のスキーマキーワード {sorted(unknown)}")
     t = schema.get("type")
+    if isinstance(t, list):
+        # 複数型はスカラー値（スプレッドシートのセル値など）にだけ使う
+        if not t or not set(t) <= _SCALAR_TYPES:
+            raise ValueError(f"{path}: 複数型の type はスカラー型のみ指定できます: {t!r}")
+        return
     if t not in _TYPES:
         raise ValueError(f"{path}: type が不正です: {t!r}")
     if t == "object":
@@ -78,9 +84,10 @@ def _type_ok(t: str, value) -> bool:
 
 def validate(schema: dict, value, path: str = "$") -> None:
     """value が schema に合うか検証し、合わなければ SchemaError を送出する。"""
-    t = schema["type"]
-    if not _type_ok(t, value):
-        raise SchemaError(f"{path}: {t} 型である必要があります")
+    types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+    t = next((x for x in types if _type_ok(x, value)), None)
+    if t is None:
+        raise SchemaError(f"{path}: {' / '.join(types)} 型である必要があります")
 
     if "enum" in schema and value not in schema["enum"]:
         raise SchemaError(f"{path}: 次のいずれかである必要があります: {schema['enum']}")

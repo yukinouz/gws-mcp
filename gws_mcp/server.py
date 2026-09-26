@@ -1,9 +1,12 @@
-"""MCP サーバー本体（JSON-RPC 2.0 over stdio、プロトコル 2026-07-28）。
+"""MCP サーバー本体（JSON-RPC 2.0 over stdio）。
 
 - 標準入力から改行区切りの JSON メッセージを 1 行ずつ読み、応答を標準出力に 1 行ずつ書く
 - 標準出力は MCP 通信専用。ログや誤った print は標準エラー出力へ流す
-- プロトコルはステートレス。接続時のハンドシェイクは無く、各リクエストの
-  _meta に含まれるプロトコルバージョンをリクエストごとに検証する
+- 新方式（2026-07-28）と旧方式（2025-11-25）の両方に対応する
+  - 新方式: ハンドシェイクは無く、各リクエストの _meta に含まれる
+    プロトコルバージョンをリクエストごとに検証する
+  - 旧方式: initialize で接続を開始し、以降そのプロセスでは _meta の無いリクエストを旧方式として扱う
+  - クライアントによっては旧方式でしか接続してこないため、旧方式も受け付ける
 - ツール実行の失敗（ガード拒否・API エラー等）はプロトコルエラーではなく
   isError: true のツール結果として返す
 """
@@ -19,6 +22,8 @@ from gws_mcp.tools import ToolError, load_tools
 
 # 実装しているプロトコルバージョン。互換性のない仕様変更があったときだけ更新する
 PROTOCOL_VERSION = "2026-07-28"
+# 旧方式（initialize によるハンドシェイク）で名乗るバージョン
+LEGACY_PROTOCOL_VERSION = "2025-11-25"
 
 SERVER_INFO = {"name": "gws-mcp", "version": __version__}
 
@@ -111,10 +116,17 @@ def _check_request_meta(params: dict) -> None:
         )
 
 
+def _has_modern_meta(params: dict) -> bool:
+    meta = params.get("_meta")
+    return isinstance(meta, dict) and META_PROTOCOL_VERSION in meta
+
+
 class MCPServer:
     def __init__(self, tools: dict, services=None):
         self.tools = tools
         self.services = services
+        # initialize を受け取った後は、_meta の無いリクエストを旧方式として扱う
+        self._legacy = False
         self._methods = {
             "server/discover": self._discover,
             "tools/list": self._list_tools,
@@ -155,16 +167,17 @@ class MCPServer:
             return _error(id_, INVALID_REQUEST, "method がありません")
 
         try:
-            handler = self._methods.get(method)
-            if handler is None:
-                # 旧方式（initialize）で接続してきたクライアントにも対応版が分かるようにする
-                raise RpcError(
-                    METHOD_NOT_FOUND,
-                    f"未対応のメソッドです: {method}（対応プロトコルバージョン: {PROTOCOL_VERSION}）",
-                )
-            params = msg.get("params")
+            params = msg.get("params", {})
             if not isinstance(params, dict):
                 raise RpcError(INVALID_PARAMS, "params はオブジェクトである必要があります")
+            if method == "initialize":
+                return {"jsonrpc": "2.0", "id": id_, "result": self._initialize(params)}
+            if self._legacy and not _has_modern_meta(params):
+                return {"jsonrpc": "2.0", "id": id_, "result": self._dispatch_legacy(method, params)}
+
+            handler = self._methods.get(method)
+            if handler is None:
+                raise RpcError(METHOD_NOT_FOUND, f"未対応のメソッドです: {method}")
             _check_request_meta(params)
             return _result(id_, handler(params))
         except RpcError as e:
@@ -173,7 +186,34 @@ class MCPServer:
             log("内部エラー:\n" + traceback.format_exc())
             return _error(id_, INTERNAL_ERROR, "サーバー内部エラー")
 
-    # ---- 各メソッド ----
+    # ---- 旧方式 ----
+
+    def _initialize(self, params: dict) -> dict:
+        # 旧方式で名乗るのは 1 版のみ。クライアントが別の版を要求した場合も
+        # この版を返し、対応できるかの判断はクライアントに任せる（仕様どおりの交渉）
+        client = params.get("clientInfo") or {}
+        log(
+            f"initialize: client={client.get('name')} {client.get('version')} "
+            f"requested={params.get('protocolVersion')} protocol={LEGACY_PROTOCOL_VERSION}"
+        )
+        self._legacy = True
+        return {
+            "protocolVersion": LEGACY_PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": SERVER_INFO,
+            "instructions": INSTRUCTIONS,
+        }
+
+    def _dispatch_legacy(self, method: str, params: dict) -> dict:
+        if method == "ping":
+            return {}
+        if method == "tools/list":
+            return {"tools": self._tool_definitions()}
+        if method == "tools/call":
+            return self._call_tool(params)
+        raise RpcError(METHOD_NOT_FOUND, f"未対応のメソッドです: {method}")
+
+    # ---- 新方式 ----
 
     def _discover(self, params: dict) -> dict:
         client = params["_meta"].get(META_CLIENT_INFO) or {}
@@ -187,9 +227,13 @@ class MCPServer:
         }
 
     def _list_tools(self, params: dict) -> dict:
+        return {"tools": self._tool_definitions(), "ttlMs": CACHE_TTL_MS, "cacheScope": "private"}
+
+    # ---- 共通 ----
+
+    def _tool_definitions(self) -> list:
         # ツール数が少ないのでページ分割せず一度に返す（cursor は無視）
-        tools = [t.definition() for t in sorted(self.tools.values(), key=lambda t: t.name)]
-        return {"tools": tools, "ttlMs": CACHE_TTL_MS, "cacheScope": "private"}
+        return [t.definition() for t in sorted(self.tools.values(), key=lambda t: t.name)]
 
     def _call_tool(self, params: dict) -> dict:
         name = params.get("name")
@@ -254,7 +298,7 @@ def main() -> None:
     sys.stdin.reconfigure(encoding="utf-8")
 
     tools = load_tools()
-    log(f"起動しました（ツール {len(tools)} 個、プロトコル {PROTOCOL_VERSION}）")
+    log(f"起動しました（ツール {len(tools)} 個、プロトコル {PROTOCOL_VERSION} / {LEGACY_PROTOCOL_VERSION}）")
     try:
         serve(MCPServer(tools, Services()), sys.stdin, protocol_out)
     except KeyboardInterrupt:

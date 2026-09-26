@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "gws": {
+      "type": "stdio",
+      "command": "/path/to/gws-mcp/.venv/bin/python",
+      "args": ["-m", "gws_mcp"],
+      "env": { "PYTHONPATH": "/path/to/gws-mcp" }
+    }
+  }
+}

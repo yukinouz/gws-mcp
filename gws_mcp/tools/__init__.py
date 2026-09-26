@@ -57,6 +57,10 @@ def register(registry: dict, tool: Tool) -> None:
 
 def load_tools() -> dict:
     """公開する全ツールを読み込んで返す。"""
+    from gws_mcp.tools import calendar, docs, drive, gmail, sheets, slides
+
     registry: dict = {}
-    # サービスごとのモジュールは各ステップで追加する
+    for module in (drive, gmail, calendar, sheets, docs, slides):
+        for tool in module.TOOLS:
+            register(registry, tool)
     return registry
