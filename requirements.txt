@@ -1,0 +1,6 @@
+# Google 公式ライブラリのみ（バージョン固定）
+# 推移的依存も固定する場合は README の「依存の固定」を参照
+google-api-python-client==2.200.0
+google-auth==2.58.1
+google-auth-oauthlib==1.4.1
+google-auth-httplib2==0.4.2
