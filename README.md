@@ -248,3 +248,7 @@ gws-mcp/
 - `credentials.json` と `token.json` は絶対にコミットしないでください（`.gitignore` で除外済み）。
 - `drive` スコープはファイル全体への読み書き権限です。実際の書き込み制限はガードのコードに依存するので、ガードを変更するときはテストも更新してください。
 - トークンを取り消すには、[Google アカウントのサードパーティ接続](https://myaccount.google.com/connections) からアプリへのアクセスを削除し、`token.json` を消します。
+
+## ライセンス
+
+[MIT License](LICENSE)
