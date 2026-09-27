@@ -1,9 +1,11 @@
 """ドキュメント ツール。
 
-書き込みは guard を通し、自分が所有するマイドライブのファイルに限る。
+- 読み取り: 本文をテキストで取得できる
+- 書き込み: 新規作成と、自分が所有するマイドライブのファイルへの追記・一括置換ができる
+- できないこと: 削除、共有ドライブや他人のファイルへの書き込み
 """
 
-from gws_mcp.tools import Tool
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool
 from gws_mcp.tools._common import created, file_id, obj, writable
 
 _DOCUMENT_ID = file_id("ドキュメントの ID")
@@ -122,6 +124,7 @@ TOOLS = [
         ),
         handler=docs_create,
         read_only=False,
+        guard=GUARD_CREATED,
     ),
     Tool(
         name="docs_append_text",
@@ -130,6 +133,7 @@ TOOLS = [
         input_schema=obj({"document_id": _DOCUMENT_ID, "text": _TEXT}, ["document_id", "text"]),
         handler=docs_append_text,
         read_only=False,
+        guard=GUARD_MYDRIVE,
     ),
     Tool(
         name="docs_replace_text",
@@ -146,6 +150,7 @@ TOOLS = [
         ),
         handler=docs_replace_text,
         read_only=False,
+        guard=GUARD_MYDRIVE,
         idempotent=True,
     ),
 ]

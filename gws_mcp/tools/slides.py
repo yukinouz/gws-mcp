@@ -1,11 +1,13 @@
 """スライド ツール。
 
-書き込みは guard を通し、自分が所有するマイドライブのファイルに限る。
+- 読み取り: 各スライドのテキストを取得できる
+- 書き込み: 新規作成と、自分が所有するマイドライブのファイルへのスライド追加・一括置換ができる
+- できないこと: 削除、共有ドライブや他人のファイルへの書き込み
 """
 
 import uuid
 
-from gws_mcp.tools import Tool
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool
 from gws_mcp.tools._common import created, file_id, obj, writable
 
 _PRESENTATION_ID = file_id("プレゼンテーションの ID")
@@ -121,6 +123,7 @@ TOOLS = [
         input_schema=obj({"title": {"type": "string", "minLength": 1, "maxLength": 255}}, ["title"]),
         handler=slides_create,
         read_only=False,
+        guard=GUARD_CREATED,
     ),
     Tool(
         name="slides_add_text_slide",
@@ -140,6 +143,7 @@ TOOLS = [
         ),
         handler=slides_add_text_slide,
         read_only=False,
+        guard=GUARD_MYDRIVE,
     ),
     Tool(
         name="slides_replace_text",
@@ -156,6 +160,7 @@ TOOLS = [
         ),
         handler=slides_replace_text,
         read_only=False,
+        guard=GUARD_MYDRIVE,
         idempotent=True,
     ),
 ]

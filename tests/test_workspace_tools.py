@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from gws_mcp.schema import SchemaError, validate
 from gws_mcp.server import MCPServer
-from gws_mcp.tools import load_tools
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, GUARD_OWN_EVENT, load_tools
 
 FILE_ID = "1AbCdEfGhIjKlMnOp"
 NEW_ID = "1NeWfIlEiDxYz9876"
@@ -93,6 +93,33 @@ WRITE_TOOLS = {
 }
 
 
+# 作成先を指定できない新規作成ツールと、作成に使う API 呼び出し・応答の ID キー
+CREATE_TOOLS = {
+    "sheets_create": (lambda s: s.apis["sheets"].spreadsheets.return_value.create, "spreadsheetId"),
+    "docs_create": (lambda s: s.docs_documents.create, "documentId"),
+    "slides_create": (lambda s: s.slides_presentations.create, "presentationId"),
+}
+
+# カレンダーの書き込みツール
+CALENDAR_WRITE_TOOLS = ("calendar_create_event", "calendar_update_event")
+
+
+class GuardCoverageTest(unittest.TestCase):
+    """Drive 以外の書き込みツールが、宣言した guard に対応するテストの対象になっていること。"""
+
+    def test_書き込みツールはすべてガードのテスト対象(self):
+        tested = {
+            GUARD_MYDRIVE: set(WRITE_TOOLS),
+            GUARD_CREATED: set(CREATE_TOOLS),
+            GUARD_OWN_EVENT: set(CALENDAR_WRITE_TOOLS),
+        }
+        for name, tool in load_tools().items():
+            if tool.read_only or name.startswith("drive_"):
+                continue
+            with self.subTest(tool=name):
+                self.assertIn(name, tested.get(tool.guard, set()), f"guard={tool.guard}")
+
+
 class WriteGuardTest(unittest.TestCase):
     def test_共有ドライブのファイルには書き込まない(self):
         for name, (args, api) in WRITE_TOOLS.items():
@@ -124,26 +151,26 @@ class WriteGuardTest(unittest.TestCase):
 
 class CreateTest(unittest.TestCase):
     def test_作成したファイルがマイドライブのものか確認する(self):
-        cases = {
-            "sheets_create": lambda s: s.apis["sheets"].spreadsheets.return_value.create,
-            "docs_create": lambda s: s.docs_documents.create,
-            "slides_create": lambda s: s.slides_presentations.create,
-        }
-        id_keys = {"sheets_create": "spreadsheetId", "docs_create": "documentId", "slides_create": "presentationId"}
-        for name, api in cases.items():
+        for name, (api, id_key) in CREATE_TOOLS.items():
             with self.subTest(tool=name):
                 s = FakeServices({NEW_ID: NEW_FILE})
-                api(s).return_value.execute.return_value = {id_keys[name]: NEW_ID}
+                api(s).return_value.execute.return_value = {id_key: NEW_ID}
                 result = call(s, name, {"title": "新規"})
                 self.assertFalse(result["isError"], result)
                 self.assertEqual(s.apis["drive"].files.return_value.get.call_args.kwargs["fileId"], NEW_ID)
 
     def test_作成先が想定外なら失敗として返す(self):
+        for name, (api, id_key) in CREATE_TOOLS.items():
+            with self.subTest(tool=name):
+                s = FakeServices({NEW_ID: {**NEW_FILE, "driveId": "0ABCDEF"}})
+                api(s).return_value.execute.return_value = {id_key: NEW_ID}
+                result = call(s, name, {"title": "新規"})
+                self.assertTrue(result["isError"])
+
+    def test_作成先が想定外なら本文を書き込まない(self):
         s = FakeServices({NEW_ID: {**NEW_FILE, "driveId": "0ABCDEF"}})
         s.docs_documents.create.return_value.execute.return_value = {"documentId": NEW_ID}
-        result = call(s, "docs_create", {"title": "新規", "text": "本文"})
-        self.assertTrue(result["isError"])
-        # 本文の書き込みまでは進まない
+        call(s, "docs_create", {"title": "新規", "text": "本文"})
         s.docs_documents.batchUpdate.assert_not_called()
 
 
@@ -194,7 +221,7 @@ class CalendarTest(unittest.TestCase):
 
     def test_書き込みツールはカレンダーIDを受け付けない(self):
         tools = load_tools()
-        for name in ("calendar_create_event", "calendar_update_event"):
+        for name in CALENDAR_WRITE_TOOLS:
             self.assertNotIn("calendar_id", tools[name].input_schema["properties"])
 
     def test_他人が主催の予定は更新しない(self):

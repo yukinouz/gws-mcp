@@ -14,6 +14,31 @@ class ToolError(Exception):
     """ツール実行の失敗（isError: true として LLM に返す想定内のエラー）。"""
 
 
+# ツールが書き込み前に行う判定の種類（判定の実装は guard.py）
+
+# 読み取り専用。
+GUARD_READ_ONLY = "read_only"
+
+# 既存ファイルへの書き込み。対象が次の4条件をすべて満たすときだけ書き込む
+# - 共有ドライブにない
+# - 自分が所有者
+# - ゴミ箱にない
+# - ショートカットではない
+GUARD_MYDRIVE = "mydrive"
+
+# 作成先フォルダを指定できる新規作成。作成先フォルダを GUARD_MYDRIVE と同じ条件で判定
+GUARD_PARENT = "parent"
+
+# 作成先を指定できない新規作成（常にマイドライブ直下に作られる）
+GUARD_CREATED = "created"
+
+# 作成先は自分のメインカレンダーに固定
+# 更新は自分が主催者の予定だけ
+GUARD_OWN_EVENT = "own_event"
+
+_GUARDS = {GUARD_READ_ONLY, GUARD_MYDRIVE, GUARD_PARENT, GUARD_CREATED, GUARD_OWN_EVENT}
+
+
 @dataclass(frozen=True)
 class Tool:
     name: str
@@ -22,6 +47,8 @@ class Tool:
     # handler(services, args) -> str | dict | list
     handler: Callable
     read_only: bool
+    # 書き込みツールは GUARD_READ_ONLY 以外を必ず宣言する（register で検査）
+    guard: str = GUARD_READ_ONLY
     idempotent: bool = False
     title: str | None = None
 
@@ -51,6 +78,10 @@ def register(registry: dict, tool: Tool) -> None:
         raise ValueError(f"ツール名が重複しています: {tool.name}")
     if tool.input_schema.get("type") != "object":
         raise ValueError(f"{tool.name}: inputSchema は object 型である必要があります")
+    if tool.guard not in _GUARDS:
+        raise ValueError(f"{tool.name}: guard が不正です: {tool.guard!r}")
+    if tool.read_only != (tool.guard == GUARD_READ_ONLY):
+        raise ValueError(f"{tool.name}: 読み取り専用のツールは guard=read_only、書き込みツールはそれ以外の guard が必須です")
     check_schema(tool.input_schema, tool.name)
     registry[tool.name] = tool
 

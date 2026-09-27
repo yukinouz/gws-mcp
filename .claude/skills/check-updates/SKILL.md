@@ -21,6 +21,6 @@ description: "gws-mcp の依存・プロトコル・Google API などに更新�
    - 旧方式の処理を削除できるのは、両方のクライアントが新方式で動くことを確認できた場合のみ
 3. **Google API**: auth.py の `_API_VERSIONS` にある各 API に、廃止や非推奨のお知らせがないか。スコープの扱いが変わっていないか
 4. **書き込みガード**
-   - `read_only=False` のツールがすべて、tools/\_common.py の `writable()` / `created()`、または guard.py の判定を通っているか
+   - 各書き込みツールの `guard=` 宣言が、処理の実態と合っているか（宣言とテスト対象一覧の突き合わせはテストで検出できるが、宣言の正しさは検出できない）
    - 書き込み用の API 呼び出しに `supportsAllDrives` が付いていないか（drive_copy_file のコピー元の読み取りは例外）
 5. **テスト**: `.venv/bin/python -m unittest discover tests` が通るか

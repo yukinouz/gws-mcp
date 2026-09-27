@@ -234,7 +234,7 @@ gws-mcp/
 
 ## メンテナンス
 
-- **書き込みガード**: 安全性を支える中心部分です。書き込み系のツールを追加・変更するときは、必ず [guard.py](gws_mcp/guard.py) の判定を通してください（[tools/\_common.py](gws_mcp/tools/_common.py) の `writable()` / `created()`）。また、書き込み用の API 呼び出しには `supportsAllDrives` を付けないでください。
+- **書き込みガード**: 安全性を支える中心部分です。書き込みツールを追加するときは、`Tool` に `guard=`（判定の種類は [tools/\_\_init\_\_.py](gws_mcp/tools/__init__.py)）を宣言し、tests のガードのテスト対象一覧にも追加してください。どちらかが抜けていると、登録時のエラーかテストの失敗になります。書き込み用の API 呼び出しには `supportsAllDrives` を付けないでください。
 - **旧方式のプロトコル対応**: Claude Code と VS Code の両方が新方式で動くことを確認できてから、削除を検討します。どちらの方式で接続したかは、標準エラー出力のログ（`initialize:` か `server/discover:` か）で分かります。
 - **入力検証**: [schema.py](gws_mcp/schema.py) が対応している JSON Schema のキーワードは一部だけです。ツールの引数に新しい種類の制約が必要になったら、先に schema.py を拡張してください。
 - **依存の更新**: テストを実行し、`requirements.lock` を作り直したうえで、実際の環境で主要なツールを動かして確認してください。テストは Google API をモックしているため、API 側の変更は検出できません。

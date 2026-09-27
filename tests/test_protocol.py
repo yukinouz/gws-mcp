@@ -10,7 +10,7 @@ from pathlib import Path
 
 from gws_mcp.auth import AuthError
 from gws_mcp.server import LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, MCPServer, serve
-from gws_mcp.tools import Tool, ToolError, register
+from gws_mcp.tools import GUARD_MYDRIVE, Tool, ToolError, register
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -33,7 +33,7 @@ def _raise(exc):
 def make_server() -> MCPServer:
     tools = {}
     register(tools, Tool("echo", "入力をそのまま返す", ECHO_SCHEMA, lambda s, a: {"echo": a["text"]}, read_only=True))
-    register(tools, Tool("guarded", "ガード拒否", EMPTY_SCHEMA, _raise(ToolError("拒否しました")), read_only=False))
+    register(tools, Tool("guarded", "ガード拒否", EMPTY_SCHEMA, _raise(ToolError("拒否しました")), read_only=False, guard=GUARD_MYDRIVE))
     register(tools, Tool("noauth", "未認証", EMPTY_SCHEMA, _raise(AuthError("トークンがありません")), read_only=True))
     register(tools, Tool("broken", "内部エラー", EMPTY_SCHEMA, _raise(RuntimeError("秘密の内部情報")), read_only=True))
     register(tools, Tool("huge", "巨大な結果", EMPTY_SCHEMA, lambda s, a: "あ" * 200_000, read_only=True))

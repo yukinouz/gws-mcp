@@ -91,6 +91,17 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(s.files_api.export.call_args.kwargs["mimeType"], "text/plain")
 
 
+# 書き込みツールと、その最小限の引数・ガードで判定される対象（既存ファイルか作成先フォルダ）
+DRIVE_WRITE_TOOLS = {
+    "drive_update_text_file": ({"file_id": FILE_ID, "content": "x"}, FILE_ID),
+    "drive_rename": ({"file_id": FILE_ID, "new_name": "x"}, FILE_ID),
+    "drive_create_folder": ({"name": "x", "parent_id": FOLDER_ID}, FOLDER_ID),
+    "drive_create_text_file": ({"name": "x", "content": "y", "parent_id": FOLDER_ID}, FOLDER_ID),
+    "drive_copy_file": ({"file_id": FILE_ID, "parent_id": FOLDER_ID}, FOLDER_ID),
+}
+_TARGET_META = {FILE_ID: MY_TEXT, FOLDER_ID: MY_FOLDER}
+
+
 class WriteGuardTest(unittest.TestCase):
     """書き込みツールがガードを通り、拒否時は書き込み API を呼ばないこと。"""
 
@@ -102,28 +113,21 @@ class WriteGuardTest(unittest.TestCase):
         s.files_api.update.assert_not_called()
         s.files_api.copy.assert_not_called()
 
-    def test_共有ドライブのファイルは更新できない(self):
-        s = FakeServices({FILE_ID: SHARED_DRIVE_FILE})
-        self.assert_rejected(s, "drive_update_text_file", {"file_id": FILE_ID, "content": "x"}, "共有ドライブ")
+    def test_共有ドライブには書き込まない(self):
+        for name, (args, target) in DRIVE_WRITE_TOOLS.items():
+            with self.subTest(tool=name):
+                s = FakeServices({target: {**_TARGET_META[target], "driveId": "0ABCDEF", "ownedByMe": False}})
+                self.assert_rejected(s, name, args, "共有ドライブ")
 
-    def test_共有ドライブのファイルは名前変更できない(self):
-        s = FakeServices({FILE_ID: SHARED_DRIVE_FILE})
-        self.assert_rejected(s, "drive_rename", {"file_id": FILE_ID, "new_name": "x"}, "共有ドライブ")
+    def test_他人のファイルやフォルダには書き込まない(self):
+        for name, (args, target) in DRIVE_WRITE_TOOLS.items():
+            with self.subTest(tool=name):
+                s = FakeServices({target: {**_TARGET_META[target], "ownedByMe": False}})
+                self.assert_rejected(s, name, args, "所有者")
 
-    def test_他人のファイルは名前変更できない(self):
-        s = FakeServices({FILE_ID: OTHERS_FILE})
-        self.assert_rejected(s, "drive_rename", {"file_id": FILE_ID, "new_name": "x"}, "所有者")
-
-    def test_共有ドライブのフォルダには作成できない(self):
-        s = FakeServices({FOLDER_ID: {**MY_FOLDER, "driveId": "0ABCDEF"}})
-        self.assert_rejected(s, "drive_create_folder", {"name": "x", "parent_id": FOLDER_ID}, "共有ドライブ")
-        self.assert_rejected(
-            s, "drive_create_text_file", {"name": "x", "content": "y", "parent_id": FOLDER_ID}, "共有ドライブ"
-        )
-
-    def test_共有ドライブのフォルダにはコピーできない(self):
-        s = FakeServices({FOLDER_ID: {**MY_FOLDER, "driveId": "0ABCDEF"}})
-        self.assert_rejected(s, "drive_copy_file", {"file_id": FILE_ID, "parent_id": FOLDER_ID}, "共有ドライブ")
+    def test_書き込みツールはすべてガードのテスト対象(self):
+        writes = {n for n, t in load_tools().items() if n.startswith("drive_") and not t.read_only}
+        self.assertEqual(writes, set(DRIVE_WRITE_TOOLS))
 
     def test_Googleドキュメントはテキスト上書きできない(self):
         s = FakeServices({FILE_ID: {**MY_TEXT, "mimeType": "application/vnd.google-apps.document"}})

@@ -1,9 +1,11 @@
 """Drive ツール。
 
-読み取りは共有ドライブも対象にする（supportsAllDrives=True）。
-書き込みは guard を通したうえで、API 呼び出しに supportsAllDrives を付けない。
-付けなければ共有ドライブのファイルは API 側で見つからない扱いになるため、
-ガードとは別にもう一段の防御になる。
+- 読み取り: マイドライブと共有ドライブのファイルを検索・一覧・取得できる
+- 書き込み: 自分が所有するマイドライブのファイルだけ、作成・上書き・名前変更・コピーができる
+- できないこと: 削除、移動、共有設定の変更、共有ドライブへの書き込み
+
+書き込みの API 呼び出しには supportsAllDrives を付けない。付けなければ共有ドライブの
+ファイルは API 側で見つからない扱いになり、書き込めないため。
 """
 
 from googleapiclient.http import MediaInMemoryUpload
@@ -15,7 +17,7 @@ from gws_mcp.guard import (
     assert_writable_file,
     assert_writable_parent,
 )
-from gws_mcp.tools import Tool, ToolError
+from gws_mcp.tools import GUARD_MYDRIVE, GUARD_PARENT, Tool, ToolError
 from gws_mcp.tools._common import created, file_id, obj
 
 # 一覧・検索で返す項目
@@ -240,6 +242,7 @@ TOOLS = [
         input_schema=obj({"name": _NAME, "parent_id": _PARENT_ID}, ["name"]),
         handler=drive_create_folder,
         read_only=False,
+        guard=GUARD_PARENT,
     ),
     Tool(
         name="drive_create_text_file",
@@ -256,6 +259,7 @@ TOOLS = [
         ),
         handler=drive_create_text_file,
         read_only=False,
+        guard=GUARD_PARENT,
     ),
     Tool(
         name="drive_update_text_file",
@@ -267,6 +271,7 @@ TOOLS = [
         ),
         handler=drive_update_text_file,
         read_only=False,
+        guard=GUARD_MYDRIVE,
         idempotent=True,
     ),
     Tool(
@@ -276,6 +281,7 @@ TOOLS = [
         input_schema=obj({"file_id": _FILE_ID, "new_name": _NAME}, ["file_id", "new_name"]),
         handler=drive_rename,
         read_only=False,
+        guard=GUARD_MYDRIVE,
         idempotent=True,
     ),
     Tool(
@@ -291,5 +297,6 @@ TOOLS = [
         ),
         handler=drive_copy_file,
         read_only=False,
+        guard=GUARD_PARENT,
     ),
 ]

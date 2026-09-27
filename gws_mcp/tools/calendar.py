@@ -1,21 +1,23 @@
-"""Calendar ツール。
+"""カレンダー ツール。
 
-- 読み取りは自分がアクセスできる任意のカレンダーを対象にする
-- 書き込み（作成・更新）は自分のメインカレンダー（primary）に限る。
-  共有されたカレンダーや他人のカレンダーは、編集権限があっても変更しない
-- 更新は自分が主催者の予定に限る（guard.assert_own_event）
-- 削除は提供しない
-- 招待メールは既定で送らない（sendUpdates="none"）。参加者への通知は明示したときだけ行う
+- 読み取り: 自分がアクセスできる任意のカレンダーの予定を取得できる
+- 書き込み: 自分のメインカレンダーへの作成と、自分が主催者の予定の更新ができる
+- できないこと: 予定の削除、共有カレンダーへの書き込み（編集権限があっても不可）、カレンダー自体の操作
+
+参加者への通知メールは既定で送らない（DEFAULT_SEND_UPDATES）。
 """
 
 import re
 from datetime import datetime, timezone
 
 from gws_mcp.guard import GuardError, assert_own_event
-from gws_mcp.tools import Tool, ToolError
+from gws_mcp.tools import GUARD_OWN_EVENT, Tool, ToolError
 from gws_mcp.tools._common import obj
 
 _PRIMARY = "primary"
+
+# 参加者への通知メールの既定値。none は送らない
+DEFAULT_SEND_UPDATES = "none"
 
 _CALENDAR_ID = {
     "type": "string",
@@ -47,7 +49,7 @@ _ATTENDEES = {
 _SEND_UPDATES = {
     "type": "string",
     "enum": ["none", "all", "externalOnly"],
-    "description": "参加者への通知メール（既定 none = 送らない）",
+    "description": f"参加者への通知メール（既定 {DEFAULT_SEND_UPDATES}）",
 }
 _TEXT = {"type": "string", "maxLength": 8000}
 
@@ -143,7 +145,7 @@ def calendar_create_event(services, args):
     event = (
         services.get("calendar")
         .events()
-        .insert(calendarId=_PRIMARY, body=body, sendUpdates=args.get("send_updates", "none"))
+        .insert(calendarId=_PRIMARY, body=body, sendUpdates=args.get("send_updates", DEFAULT_SEND_UPDATES))
         .execute()
     )
     return _compact(event)
@@ -162,7 +164,7 @@ def calendar_update_event(services, args):
             calendarId=_PRIMARY,
             eventId=args["event_id"],
             body=body,
-            sendUpdates=args.get("send_updates", "none"),
+            sendUpdates=args.get("send_updates", DEFAULT_SEND_UPDATES),
         )
         .execute()
     )
@@ -199,22 +201,24 @@ TOOLS = [
         name="calendar_create_event",
         title="予定を作成",
         description=(
-            "自分のメインカレンダーに予定を作成する。参加者への招待メールは send_updates を指定しない限り送らない。"
+            "自分のメインカレンダーに予定を作成する。参加者への招待メールは send_updates で指定する。"
         ),
         input_schema=obj(_EVENT_PROPS, ["summary", "start", "end"]),
         handler=calendar_create_event,
         read_only=False,
+        guard=GUARD_OWN_EVENT,
     ),
     Tool(
         name="calendar_update_event",
         title="予定を更新",
         description=(
             "自分のメインカレンダーにある、自分が主催者の予定を部分更新する（指定した項目だけ変更）。"
-            "attendees を指定すると参加者リストを置き換える。通知メールは send_updates を指定しない限り送らない。"
+            "attendees を指定すると参加者リストを置き換える。通知メールは send_updates で指定する。"
         ),
         input_schema=obj({"event_id": _EVENT_ID, **_EVENT_PROPS}, ["event_id"]),
         handler=calendar_update_event,
         read_only=False,
+        guard=GUARD_OWN_EVENT,
         idempotent=True,
     ),
 ]

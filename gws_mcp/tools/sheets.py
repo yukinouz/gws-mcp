@@ -1,12 +1,15 @@
 """スプレッドシート ツール。
 
-書き込みは guard を通し、自分が所有するマイドライブのファイルに限る。
+- 読み取り: シート構成と範囲の値を取得できる
+- 書き込み: 新規作成と、自分が所有するマイドライブのファイルへの書き込み・行の追記・シート追加ができる
+- できないこと: 削除、共有ドライブや他人のファイルへの書き込み
+
 値は既定で RAW（入力をそのまま文字列・数値として保存）で書き込む。
 USER_ENTERED だと "=IMPORTDATA(...)" のような数式が実行され、
 シートの内容を外部に送信できてしまうため、明示したときだけ使う。
 """
 
-from gws_mcp.tools import Tool
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool
 from gws_mcp.tools._common import created, file_id, obj, writable
 
 _SPREADSHEET_ID = file_id("スプレッドシートの ID")
@@ -150,6 +153,7 @@ TOOLS = [
         ),
         handler=sheets_create,
         read_only=False,
+        guard=GUARD_CREATED,
     ),
     Tool(
         name="sheets_write_range",
@@ -166,6 +170,7 @@ TOOLS = [
         ),
         handler=sheets_write_range,
         read_only=False,
+        guard=GUARD_MYDRIVE,
         idempotent=True,
     ),
     Tool(
@@ -183,6 +188,7 @@ TOOLS = [
         ),
         handler=sheets_append_rows,
         read_only=False,
+        guard=GUARD_MYDRIVE,
     ),
     Tool(
         name="sheets_add_sheet",
@@ -191,5 +197,6 @@ TOOLS = [
         input_schema=obj({"spreadsheet_id": _SPREADSHEET_ID, "title": _SHEET_TITLE}, ["spreadsheet_id", "title"]),
         handler=sheets_add_sheet,
         read_only=False,
+        guard=GUARD_MYDRIVE,
     ),
 ]
