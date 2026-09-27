@@ -198,20 +198,40 @@ class SheetsTest(unittest.TestCase):
             validate(schema, {"spreadsheet_id": FILE_ID, "range": "A1", "values": [[None]]})
 
 
+# 参加者がいる予定の作成引数
+_MEETING = {
+    "summary": "打合せ",
+    "start": "2026-10-01T10:00:00+09:00",
+    "end": "2026-10-01T11:00:00+09:00",
+    "attendees": ["a@example.com"],
+}
+
+
 class CalendarTest(unittest.TestCase):
-    def test_作成はprimaryで招待メールを送らない(self):
+    def test_作成はprimaryで指定どおりに通知する(self):
         s = FakeServices()
         s.calendar_events.insert.return_value.execute.return_value = {"id": "e1"}
-        result = call(
-            s,
-            "calendar_create_event",
-            {"summary": "打合せ", "start": "2026-10-01T10:00:00+09:00", "end": "2026-10-01T11:00:00+09:00", "attendees": ["a@example.com"]},
-        )
+        result = call(s, "calendar_create_event", {**_MEETING, "send_updates": "all"})
         self.assertFalse(result["isError"], result)
         kwargs = s.calendar_events.insert.call_args.kwargs
         self.assertEqual(kwargs["calendarId"], "primary")
-        self.assertEqual(kwargs["sendUpdates"], "none")
+        self.assertEqual(kwargs["sendUpdates"], "all")
         self.assertEqual(kwargs["body"]["start"], {"dateTime": "2026-10-01T10:00:00+09:00"})
+
+    def test_参加者がいて通知の指定がなければ作成しない(self):
+        s = FakeServices()
+        result = call(s, "calendar_create_event", _MEETING)
+        self.assertTrue(result["isError"])
+        self.assertIn("send_updates", result["content"][0]["text"])
+        s.calendar_events.insert.assert_not_called()
+
+    def test_参加者がいなければ通知の指定は不要(self):
+        s = FakeServices()
+        s.calendar_events.insert.return_value.execute.return_value = {"id": "e1"}
+        args = {k: v for k, v in _MEETING.items() if k != "attendees"}
+        result = call(s, "calendar_create_event", args)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(s.calendar_events.insert.call_args.kwargs["sendUpdates"], "none")
 
     def test_終日予定は日付で作成(self):
         s = FakeServices()
@@ -241,6 +261,28 @@ class CalendarTest(unittest.TestCase):
         self.assertEqual(kwargs["body"], {"summary": "変更"})
         self.assertEqual(kwargs["calendarId"], "primary")
         self.assertEqual(kwargs["sendUpdates"], "none")
+
+    def test_既存の予定に参加者がいれば通知の指定がないと更新しない(self):
+        s = FakeServices()
+        s.calendar_events.get.return_value.execute.return_value = {
+            "id": "e1",
+            "organizer": {"self": True},
+            "attendees": [{"email": "a@example.com"}],
+        }
+        result = call(s, "calendar_update_event", {"event_id": "e1", "summary": "変更"})
+        self.assertTrue(result["isError"])
+        s.calendar_events.patch.assert_not_called()
+
+    def test_参加者を外すときも通知の指定が必要(self):
+        s = FakeServices()
+        s.calendar_events.get.return_value.execute.return_value = {
+            "id": "e1",
+            "organizer": {"self": True},
+            "attendees": [{"email": "a@example.com"}],
+        }
+        result = call(s, "calendar_update_event", {"event_id": "e1", "attendees": []})
+        self.assertTrue(result["isError"])
+        s.calendar_events.patch.assert_not_called()
 
     def test_削除ツールは無い(self):
         self.assertFalse([n for n in load_tools() if "delete" in n])

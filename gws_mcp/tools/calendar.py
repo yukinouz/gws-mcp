@@ -4,7 +4,8 @@
 - 書き込み: 自分のメインカレンダーへの作成と、自分が主催者の予定の更新ができる
 - できないこと: 予定の削除、共有カレンダーへの書き込み（編集権限があっても不可）、カレンダー自体の操作
 
-参加者への通知メールは既定で送らない（DEFAULT_SEND_UPDATES）。
+参加者がいる予定では、通知メールを送るか（send_updates）の指定を必須にする。
+送るかどうかを既定値に任せず、毎回ユーザーに確認させるため。
 """
 
 import re
@@ -16,8 +17,8 @@ from gws_mcp.tools._common import obj
 
 _PRIMARY = "primary"
 
-# 参加者への通知メールの既定値。none は送らない
-DEFAULT_SEND_UPDATES = "none"
+# 参加者がいない予定の通知設定（通知先がいないため送らない）
+_NO_ATTENDEES_SEND_UPDATES = "none"
 
 _CALENDAR_ID = {
     "type": "string",
@@ -49,7 +50,10 @@ _ATTENDEES = {
 _SEND_UPDATES = {
     "type": "string",
     "enum": ["none", "all", "externalOnly"],
-    "description": f"参加者への通知メール（既定 {DEFAULT_SEND_UPDATES}）",
+    "description": (
+        "参加者への通知メール。none: 送らない、all: 全員に送る、externalOnly: 組織外の参加者だけに送る。"
+        "参加者がいる予定では必須。通知するかをユーザーに確認してから指定する"
+    ),
 }
 _TEXT = {"type": "string", "maxLength": 8000}
 
@@ -87,6 +91,18 @@ def _event_body(args: dict) -> dict:
     if "attendees" in args:
         body["attendees"] = [{"email": e} for e in args["attendees"]]
     return body
+
+
+def _send_updates(args: dict, has_attendees: bool) -> str:
+    """通知メールの送信設定を返す。参加者がいるのに指定がなければ ToolError。"""
+    if "send_updates" in args:
+        return args["send_updates"]
+    if has_attendees:
+        raise ToolError(
+            "参加者がいる予定のため、通知メールを送るか（send_updates）の指定が必要です。"
+            "ユーザーに確認してから指定してください。"
+        )
+    return _NO_ATTENDEES_SEND_UPDATES
 
 
 def _compact(event: dict) -> dict:
@@ -142,10 +158,11 @@ def calendar_create_event(services, args):
     body = _event_body(args)
     if "start" not in body or "end" not in body:
         raise ToolError("start と end は必須です。")
+    send_updates = _send_updates(args, bool(args.get("attendees")))
     event = (
         services.get("calendar")
         .events()
-        .insert(calendarId=_PRIMARY, body=body, sendUpdates=args.get("send_updates", DEFAULT_SEND_UPDATES))
+        .insert(calendarId=_PRIMARY, body=body, sendUpdates=send_updates)
         .execute()
     )
     return _compact(event)
@@ -158,13 +175,15 @@ def calendar_update_event(services, args):
     body = _event_body(args)
     if not body:
         raise GuardError("変更する項目が指定されていません。")
+    # 参加者を外す場合も、外される側に通知が届きうるため既存の参加者も含めて判定する
+    send_updates = _send_updates(args, bool(args.get("attendees") or current.get("attendees")))
     event = (
         calendar.events()
         .patch(
             calendarId=_PRIMARY,
             eventId=args["event_id"],
             body=body,
-            sendUpdates=args.get("send_updates", DEFAULT_SEND_UPDATES),
+            sendUpdates=send_updates,
         )
         .execute()
     )
@@ -201,7 +220,7 @@ TOOLS = [
         name="calendar_create_event",
         title="予定を作成",
         description=(
-            "自分のメインカレンダーに予定を作成する。参加者への招待メールは send_updates で指定する。"
+            "自分のメインカレンダーに予定を作成する。参加者がいる場合は、招待メールを送るかをユーザーに確認して send_updates に指定する。"
         ),
         input_schema=obj(_EVENT_PROPS, ["summary", "start", "end"]),
         handler=calendar_create_event,
@@ -213,7 +232,7 @@ TOOLS = [
         title="予定を更新",
         description=(
             "自分のメインカレンダーにある、自分が主催者の予定を部分更新する（指定した項目だけ変更）。"
-            "attendees を指定すると参加者リストを置き換える。通知メールは send_updates で指定する。"
+            "attendees を指定すると参加者リストを置き換える。参加者がいる場合は、通知メールを送るかをユーザーに確認して send_updates に指定する。"
         ),
         input_schema=obj({"event_id": _EVENT_ID, **_EVENT_PROPS}, ["event_id"]),
         handler=calendar_update_event,
