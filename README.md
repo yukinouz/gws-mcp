@@ -5,7 +5,6 @@
 LLM の誤操作による意図しない変更・削除・情報流出を防ぐための制限をコード側で強制します。
 
 - 外部依存は **Google 公式ライブラリのみ**です。サードパーティ製フレームワークは使いません。
-- MCP プロトコルは新方式（`2026-07-28`、リクエストごとにバージョンを付ける方式）と旧方式（`2025-11-25`、最初に `initialize` で接続する方式）の両方に対応します。Claude Code は段階的に新方式へ移行中で、現在は多くの場合旧方式で接続します（環境変数 `MCP_PROTOCOL_NEGOTIATION=auto` を付けると新方式を試します）。
 
 ## 対応サービスと操作範囲
 
@@ -26,14 +25,16 @@ LLM の誤操作による意図しない変更・削除・情報流出を防ぐ�
 
 ### 書き込みガード
 
-すべての書き込み系ツールは、実行前に Drive API（`files.get`）で対象ファイルの情報を取得し、次のいずれかに当てはまれば **API を呼ばずにエラーを返します**。
+Drive・スプレッドシート・ドキュメント・スライドの書き込み系ツールは、実行前に Drive API（`files.get`）で対象ファイルの情報を取得し、次のいずれかに当てはまれば **API を呼ばずにエラーを返します**。
 
 - `driveId` がある（共有ドライブ内のファイル）
 - `ownedByMe` が `true` でない（他人が所有するファイル）
 - ゴミ箱に入っている
 - ショートカットである（リンク先が共有ドライブのファイルかどうかを ID から判別できないため）
 
-新規作成では、作成先の親フォルダに同じ判定をかけます（既定の作成先はマイドライブ直下）。ファイル ID は形式をチェックしてから使います。
+Drive のフォルダ作成・ファイル作成・コピーでは、作成先の親フォルダに同じ判定をかけます（既定の作成先はマイドライブ直下）。スプレッドシート・ドキュメント・スライドの新規作成は常にマイドライブ直下に作られ、作成後にできたファイルを同じ条件で確認します。ファイル ID は形式をチェックしてから使います。
+
+カレンダーは Drive のファイルではないため、予定を取得して自分が主催者かを判定します（※2）。
 
 OAuth スコープではマイドライブと共有ドライブを区別できないため、この制限はスコープではなくコード（[gws_mcp/guard.py](gws_mcp/guard.py)）で強制しています。
 
@@ -67,10 +68,12 @@ OAuth スコープではマイドライブと共有ドライブを区別でき�
 ## 必要なもの
 
 - Python 3.10 以上
-- Google アカウント
+- Google Workspace アカウント
 - Google Cloud プロジェクト（OAuth クライアント作成用）
 
 ## セットアップ
+
+以下の手順はスキル(`/setup`)で対話的に進められます
 
 ### 1. Google Cloud の準備
 
@@ -82,7 +85,7 @@ OAuth スコープではマイドライブと共有ドライブを区別でき�
    - Google Sheets API
    - Google Docs API
    - Google Slides API
-3. 「OAuth 同意画面」を設定します。個人利用なら「外部」＋テストユーザーに自分のアカウントを追加すれば十分です。
+3. 「Google Auth Platform」で OAuth 同意画面を設定し、「対象」でユーザーの種類に「内部」を選びます（組織利用が前提。個人利用で「外部」かつ「テスト中」にすると、トークンが 7 日で失効します）。
 4. 「認証情報」→「認証情報を作成」→「OAuth クライアント ID」で、種類に **デスクトップアプリ** を選びます。
 5. JSON をダウンロードし、`~/.config/gws-mcp/credentials.json` として保存します。
 
@@ -99,18 +102,10 @@ chmod 600 ~/.config/gws-mcp/credentials.json
 ```sh
 cd /path/to/gws-mcp
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
-
-#### 依存の固定（推奨）
-
-`requirements.txt` で固定しているのは公式4パッケージのバージョンだけです。推移的な依存まで動作確認済みのバージョンで入れる場合は `requirements.lock` を使います。
-
-```sh
 .venv/bin/pip install -r requirements.lock
 ```
 
-依存を更新したときは `.venv/bin/pip freeze > requirements.lock` で作り直します。
+`requirements.lock` は、推移的な依存まで動作確認済みのバージョンで固定したものです。直接の依存（Google 公式4パッケージ）は `requirements.txt` で管理し、更新したときは `.venv/bin/pip freeze > requirements.lock` で作り直します。
 
 ### 3. 初回認証
 
@@ -174,7 +169,7 @@ claude mcp add --scope user gws -e PYTHONPATH=/path/to/gws-mcp -- /path/to/gws-m
 
 ### カレンダー
 
-| ツール                  | 種別 | 説明                         |
+| ツール                  | 種別 | 説明                               |
 | ----------------------- | ---- | ---------------------------------- |
 | `calendar_list_events`  | 読取 | 期間・キーワードで予定を一覧       |
 | `calendar_get_event`    | 読取 | 予定の詳細を取得                   |
@@ -224,7 +219,9 @@ gws-mcp/
 │   └── authorize.py   # 初回 OAuth 認証
 ├── tests/             # unittest（Google API はモック）
 ├── config/            # 各 MCP クライアント用の設定例
-└── requirements.txt
+├── .claude/           # Claude Code 用の skill（/setup・/check-updates など）と、資格情報へのアクセスを防ぐフック・設定
+├── requirements.txt   # 直接の依存
+└── requirements.lock  # 推移的な依存まで固定したもの（インストールに使う）
 ```
 
 ## テスト
@@ -235,15 +232,16 @@ gws-mcp/
 .venv/bin/python -m unittest discover tests
 ```
 
-手動で通信を確認する場合（MCP プロトコル `2026-07-28`。各リクエストの `_meta` にバージョンを付ける）:
+## メンテナンス
 
-```sh
-META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
-printf '%s\n' \
-  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$META}}" \
-  "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{$META}}" \
-  | .venv/bin/python -m gws_mcp
-```
+- **書き込みガード**: 安全性を支える中心部分です。書き込み系のツールを追加・変更するときは、必ず [guard.py](gws_mcp/guard.py) の判定を通してください（[tools/\_common.py](gws_mcp/tools/_common.py) の `writable()` / `created()`）。また、書き込み用の API 呼び出しには `supportsAllDrives` を付けないでください。
+- **旧方式のプロトコル対応**: Claude Code と VS Code の両方が新方式で動くことを確認できてから、削除を検討します。どちらの方式で接続したかは、標準エラー出力のログ（`initialize:` か `server/discover:` か）で分かります。
+- **入力検証**: [schema.py](gws_mcp/schema.py) が対応している JSON Schema のキーワードは一部だけです。ツールの引数に新しい種類の制約が必要になったら、先に schema.py を拡張してください。
+- **依存の更新**: テストを実行し、`requirements.lock` を作り直したうえで、実際の環境で主要なツールを動かして確認してください。テストは Google API をモックしているため、API 側の変更は検出できません。
+
+### 確認方法(`/check-updates` スキル)
+
+定期的な更新確認は、Claude Code の `/check-updates` skill（[.claude/skills/check-updates/SKILL.md](.claude/skills/check-updates/SKILL.md)）で行えます。
 
 ## 注意事項
 
