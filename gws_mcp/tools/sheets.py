@@ -9,8 +9,16 @@ USER_ENTERED だと "=IMPORTDATA(...)" のような数式が実行され、
 シートの内容を外部に送信できてしまうため、明示したときだけ使う。
 """
 
-from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool
+import re
+
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
 from gws_mcp.tools._common import created, file_id, obj, writable
+
+# Google が引数の URL にアクセスする関数。URL にセルの値を埋め込まれると外部に送られる。
+# IMPORTRANGE（Google スプレッドシート間の参照）や HYPERLINK（表示のみ）は外部に出ないので対象外。
+_EXTERNAL_FETCH_FUNCTIONS = ("IMPORTDATA", "IMPORTXML", "IMPORTHTML", "IMPORTFEED", "IMAGE")
+# 見逃しより誤検知を優先する: 文字列リテラル内も単語の途中も区別せずに検索する
+_EXTERNAL_FETCH_RE = re.compile(r"(" + "|".join(_EXTERNAL_FETCH_FUNCTIONS) + r")\s*\(", re.IGNORECASE)
 
 _SPREADSHEET_ID = file_id("スプレッドシートの ID")
 _RANGE = {"type": "string", "minLength": 1, "maxLength": 200, "description": "A1 形式の範囲（例: シート1!A1:D10）"}
@@ -26,6 +34,26 @@ _VALUE_INPUT = {
     "description": "RAW（既定・そのまま保存）または USER_ENTERED（数式や日付を解釈する）",
 }
 _SHEET_TITLE = {"type": "string", "minLength": 1, "maxLength": 100}
+
+
+def _reject_external_fetch(values):
+    """外部 URL にアクセスする関数を含むセルがあれば、該当セルを列挙して ToolError を送出する。
+
+    "=" 以外（"+" "-" など）で始まっても数式になりうるため、文字列のセルはすべて検査する。
+    """
+    hits = []
+    for r, row in enumerate(values):
+        for c, cell in enumerate(row):
+            if isinstance(cell, str) and (m := _EXTERNAL_FETCH_RE.search(cell)):
+                hits.append(f"values[{r}][{c}]（{m.group(1).upper()}）")
+    if hits:
+        raise ToolError(
+            "外部 URL にアクセスする関数（"
+            + " ".join(_EXTERNAL_FETCH_FUNCTIONS)
+            + "）は、データが外部に送られるのを防ぐため使えません。書き込みは行っていません。"
+            + "該当セル（0 始まりの行・列番号）: "
+            + "、".join(hits)
+        )
 
 
 def sheets_get_metadata(services, args):
