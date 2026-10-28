@@ -97,14 +97,15 @@ def _reject_external_fetch(values):
 
 
 def _split_fields(fields, depth: int = 0) -> list | None:
-    """fields（FieldMask）を最上位のカンマで分ける。"a(b,c),d" は ["a(b,c)", "d"] になる。
+    """fields（FieldMask）を最上位のカンマで分け、各項目が "a.b" か "a.b(…)" の形かを確かめる。
 
-    形が不正なら None を返す。API 側の解釈に任せず、呼ぶ前に止めるため。
+    "a(b,c),d" は ["a(b,c)", "d"] になる。形が不正なら None を返す。
+    値の項目を書式の項目に見せかける書き方を、API 側の解釈に任せず、呼ぶ前に止めるため。
     """
     if not isinstance(fields, str) or depth > _MAX_FIELD_DEPTH:
         return None
-    # 空白はカンマと括弧の前後だけ許す。項目名の途中の空白は不正として残す
-    fields = re.sub(r"\s*([,()])\s*", r"\1", fields).strip()
+    # 空白（ASCII のみ）はカンマと括弧の前後だけ許す。項目名の途中の空白は不正として残す
+    fields = re.sub(r"[ \t\r\n]*([,()])[ \t\r\n]*", r"\1", fields).strip(" \t\r\n")
     parts, level, start = [], 0, 0
     for i, ch in enumerate(fields):
         if ch == "(":
@@ -145,8 +146,8 @@ def _check_fields(body: dict, path: str, is_allowed, hint: str) -> list:
     """fields を分けて、許可しない項目があれば問題の説明を返す。"""
     fields = _split_fields(body.get("fields"))
     if not fields:
-        return [f"{path}.fields: {hint} を、項目名をカンマで区切って指定してください"]
-    return [f"{path}.fields: {f} は使えません（{hint} だけ）" for f in fields if not is_allowed(f)]
+        return [f"{path}.fields: 形が不正か空です。使える項目: {hint}"]
+    return [f"{path}.fields: {f} は使えません。使える項目: {hint}" for f in fields if not is_allowed(f)]
 
 
 def _check_batch_request(kind: str, body: dict, path: str) -> list:
@@ -163,7 +164,7 @@ def _check_batch_request(kind: str, body: dict, path: str) -> list:
         problems += _check_fields(body, path, _is_format_field, "userEnteredFormat で始まる項目")
     elif kind in _BATCH_ALLOWED_FIELDS:
         allowed = _BATCH_ALLOWED_FIELDS[kind]
-        problems += _check_fields(body, path, allowed.__contains__, "次のいずれか（" + " ".join(sorted(allowed)) + "）")
+        problems += _check_fields(body, path, allowed.__contains__, " ".join(sorted(allowed)))
     elif kind == "setBasicFilter":
         # 並べ替え（sortSpecs）は行の位置を変えるため、sortRange と同じく使わせない。
         # API は sort_specs のような書き方も受け付けるため、禁止するキーではなく許すキーで判定する

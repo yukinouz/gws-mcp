@@ -361,6 +361,19 @@ class SheetsBatchUpdateTest(unittest.TestCase):
         req = {**_BOLD_HEADER["repeatCell"], "cell": {"user_entered_value": {"stringValue": "x"}}}
         self._assert_rejected([{"repeatCell": req}], "cell.user_entered_value")
 
+    def test_fieldsの括弧の入れ子は書式に必要な深さまで(self):
+        # 実在する書式で一番深いのは borders(top(colorStyle(rgbColor(red))))
+        ok = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(borders(top(colorStyle(rgbColor(red)))))"}
+        result, _ = self._call([{"repeatCell": ok}])
+        self.assertFalse(result["isError"], result)
+        too_deep = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(a(b(c(d(e(f))))))"}
+        self._assert_rejected([{"repeatCell": too_deep}], "fields")
+
+    def test_fieldsの特殊な空白は拒否する(self):
+        for fields in ("userEnteredFormat\x1c(a)", "userEnteredFormat(a)\xa0", "userEnteredFormat\u3000,userEnteredValue"):
+            with self.subTest(fields=fields):
+                self._assert_rejected([{"repeatCell": {**_BOLD_HEADER["repeatCell"], "fields": fields}}], "fields")
+
     def test_repeatCellのfieldsは括弧でまとめて指定できる(self):
         req = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(textFormat,backgroundColor), userEnteredFormat.wrapStrategy"}
         result, batch = self._call([{"repeatCell": req}])
