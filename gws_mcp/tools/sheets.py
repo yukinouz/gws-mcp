@@ -68,8 +68,10 @@ _BATCH_ALLOWED_FIELDS = {
     "updateSheetProperties": {"gridProperties.frozenRowCount", "gridProperties.frozenColumnCount", "tabColorStyle"},
     "updateDimensionProperties": {"pixelSize"},
 }
-# fields に書ける文字。項目名・ピリオド・カンマ・括弧・空白だけ
-_FIELD_MASK_RE = re.compile(r"[A-Za-z0-9_.,()\s]+")
+# fields の項目名。英数字とアンダースコアの名前をピリオドでつなぐ
+_FIELD_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+# fields の括弧の入れ子の上限。書式の指定ではこれより深くならない
+_MAX_FIELD_DEPTH = 5
 # setBasicFilter の filter に許すキー。並べ替え（sortSpecs）を含めない
 _BASIC_FILTER_KEYS = frozenset({"range", "filterSpecs", "criteria", "tableId"})
 
@@ -94,28 +96,45 @@ def _reject_external_fetch(values):
         )
 
 
-def _split_fields(fields) -> list | None:
+def _split_fields(fields, depth: int = 0) -> list | None:
     """fields（FieldMask）を最上位のカンマで分ける。"a(b,c),d" は ["a(b,c)", "d"] になる。
 
-    括弧の対応が崩れているなど形が不正なら None を返す。API 側の解釈に任せず、呼ぶ前に止めるため。
+    形が不正なら None を返す。API 側の解釈に任せず、呼ぶ前に止めるため。
     """
-    if not isinstance(fields, str) or not _FIELD_MASK_RE.fullmatch(fields):
+    if not isinstance(fields, str) or depth > _MAX_FIELD_DEPTH:
         return None
-    parts, depth, start = [], 0, 0
+    # 空白はカンマと括弧の前後だけ許す。項目名の途中の空白は不正として残す
+    fields = re.sub(r"\s*([,()])\s*", r"\1", fields).strip()
+    parts, level, start = [], 0, 0
     for i, ch in enumerate(fields):
         if ch == "(":
-            depth += 1
+            level += 1
         elif ch == ")":
-            depth -= 1
-            if depth < 0:
+            level -= 1
+            if level < 0:
                 return None
-        elif ch == "," and depth == 0:
-            parts.append(fields[start:i].strip())
+        elif ch == "," and level == 0:
+            parts.append(fields[start:i])
             start = i + 1
-    if depth != 0:
+    if level != 0:
         return None
-    parts.append(fields[start:].strip())
-    return [p for p in parts if p]
+    parts.append(fields[start:])
+    if parts == [""]:
+        return []
+    return parts if all(_is_valid_field(p, depth) for p in parts) else None
+
+
+def _is_valid_field(part: str, depth: int) -> bool:
+    """"a.b" か "a.b(…)" の形だけを許す。閉じ括弧の後ろに文字があれば不正。"""
+    m = _FIELD_PATH_RE.match(part)
+    if not m:
+        return False
+    rest = part[m.end() :]
+    if not rest:
+        return True
+    if not (rest.startswith("(") and rest.endswith(")")):
+        return False
+    return bool(_split_fields(rest[1:-1], depth + 1))
 
 
 def _is_format_field(field: str) -> bool:
@@ -126,7 +145,7 @@ def _check_fields(body: dict, path: str, is_allowed, hint: str) -> list:
     """fields を分けて、許可しない項目があれば問題の説明を返す。"""
     fields = _split_fields(body.get("fields"))
     if not fields:
-        return [f"{path}.fields: {hint} を、項目名とカンマ・括弧だけで指定してください"]
+        return [f"{path}.fields: {hint} を、項目名をカンマで区切って指定してください"]
     return [f"{path}.fields: {f} は使えません（{hint} だけ）" for f in fields if not is_allowed(f)]
 
 
@@ -138,13 +157,13 @@ def _check_batch_request(kind: str, body: dict, path: str) -> list:
         # 値を消さないための本当の防御は fields の検査。cell の検査は、値を渡した意図に気づかせるためのもの
         if not isinstance(cell, dict):
             problems.append(f"{path}.cell: オブジェクトにしてください")
-        elif "userEnteredValue" in cell or "user_entered_value" in cell:
-            problems.append(f"{path}.cell.userEnteredValue: 値は sheets_write_range で書き込んでください")
+        elif value_keys := {"userEnteredValue", "user_entered_value"} & set(cell):
+            problems.append(f"{path}.cell.{min(value_keys)}: 値は sheets_write_range で書き込んでください")
         # fields に値の項目や "*" を含めると、cell に値がなくても範囲の値が消える
         problems += _check_fields(body, path, _is_format_field, "userEnteredFormat で始まる項目")
     elif kind in _BATCH_ALLOWED_FIELDS:
         allowed = _BATCH_ALLOWED_FIELDS[kind]
-        problems += _check_fields(body, path, allowed.__contains__, " ".join(sorted(allowed)))
+        problems += _check_fields(body, path, allowed.__contains__, "次のいずれか（" + " ".join(sorted(allowed)) + "）")
     elif kind == "setBasicFilter":
         # 並べ替え（sortSpecs）は行の位置を変えるため、sortRange と同じく使わせない。
         # API は sort_specs のような書き方も受け付けるため、禁止するキーではなく許すキーで判定する

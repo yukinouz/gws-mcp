@@ -348,14 +348,18 @@ class SheetsBatchUpdateTest(unittest.TestCase):
 
     def test_repeatCellのfieldsは形が崩れていれば拒否する(self):
         for fields in ("userEnteredFormat(a)),userEnteredValue", "userEnteredFormat(a,userEnteredValue",
-                       "userEnteredFormat;userEnteredValue", "userEnteredFormat/userEnteredValue"):
+                       "userEnteredFormat;userEnteredValue", "userEnteredFormat/userEnteredValue",
+                       "userEnteredFormat(a)userEnteredValue", "userEnteredFormat(a)(userEnteredValue)",
+                       "userEnteredFormat.a userEnteredValue", "userEnteredFormat()", "userEnteredFormat(,)",
+                       "userEnteredFormat..x", "userEnteredFormat,,userEnteredValue",
+                       "userEnteredFormat" + "(a" * 1000 + ")" * 1000):
             with self.subTest(fields=fields):
                 req = {**_BOLD_HEADER["repeatCell"], "fields": fields}
                 self._assert_rejected([{"repeatCell": req}], "fields")
 
     def test_repeatCellはsnake_caseの値も拒否する(self):
         req = {**_BOLD_HEADER["repeatCell"], "cell": {"user_entered_value": {"stringValue": "x"}}}
-        self._assert_rejected([{"repeatCell": req}], "cell.userEnteredValue")
+        self._assert_rejected([{"repeatCell": req}], "cell.user_entered_value")
 
     def test_repeatCellのfieldsは括弧でまとめて指定できる(self):
         req = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(textFormat,backgroundColor), userEnteredFormat.wrapStrategy"}
@@ -383,6 +387,13 @@ class SheetsBatchUpdateTest(unittest.TestCase):
             for fields in fields_list:
                 with self.subTest(kind=kind, fields=fields):
                     self._assert_rejected([{kind: {"properties": {}, "fields": fields}}], "fields")
+
+    def test_フィルタの絞り込みは通す(self):
+        spec = {"columnIndex": 0, "filterCriteria": {"hiddenValues": ["x"]}}
+        req = {"filter": {"range": {"sheetId": 0}, "filterSpecs": [spec], "criteria": {}}}
+        result, batch = self._call([{"setBasicFilter": req}])
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
 
     def test_フィルタの並べ替えは拒否する(self):
         req = {"filter": {"range": {"sheetId": 0}, "sortSpecs": [{"dimensionIndex": 0, "sortOrder": "ASCENDING"}]}}
@@ -431,10 +442,10 @@ class SheetsBatchUpdateTest(unittest.TestCase):
             validate(schema, {"spreadsheet_id": FILE_ID, "requests": "x" * 200_001})
 
     def test_入れ子が深くても検査の途中で落ちない(self):
-        # Python の再帰の上限（既定 1000）を超える深さ。JSON として読めれば検査を通り、読めなければ拒否される
+        # Python の再帰の上限（既定 1000）を超える深さでも、最後の文字列まで検査が届く
         depth = 5_000
         text = '[{"autoResizeDimensions": ' + '{"x": ' * depth + '"=IMAGE(A1)"' + "}" * depth + "}]"
-        self._assert_rejected(text)
+        self._assert_rejected(text, "外部 URL")
 
 
 # 参加者がいる予定の作成引数
