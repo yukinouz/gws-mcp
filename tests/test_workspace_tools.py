@@ -80,6 +80,10 @@ WRITE_TOOLS = {
         {"spreadsheet_id": FILE_ID, "title": "新シート"},
         lambda s: s.apis["sheets"].spreadsheets.return_value.batchUpdate,
     ),
+    "sheets_batch_update": (
+        {"spreadsheet_id": FILE_ID, "requests": '[{"autoResizeDimensions": {"dimensions": {"sheetId": 0}}}]'},
+        lambda s: s.apis["sheets"].spreadsheets.return_value.batchUpdate,
+    ),
     "docs_append_text": ({"document_id": FILE_ID, "text": "x"}, lambda s: s.docs_documents.batchUpdate),
     "docs_replace_text": (
         {"document_id": FILE_ID, "find": "a", "replace": "b"},
