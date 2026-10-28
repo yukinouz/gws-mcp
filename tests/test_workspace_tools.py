@@ -346,6 +346,17 @@ class SheetsBatchUpdateTest(unittest.TestCase):
                 req = {**_BOLD_HEADER["repeatCell"], "fields": fields}
                 self._assert_rejected([{"repeatCell": req}], "fields")
 
+    def test_repeatCellのfieldsは形が崩れていれば拒否する(self):
+        for fields in ("userEnteredFormat(a)),userEnteredValue", "userEnteredFormat(a,userEnteredValue",
+                       "userEnteredFormat;userEnteredValue", "userEnteredFormat/userEnteredValue"):
+            with self.subTest(fields=fields):
+                req = {**_BOLD_HEADER["repeatCell"], "fields": fields}
+                self._assert_rejected([{"repeatCell": req}], "fields")
+
+    def test_repeatCellはsnake_caseの値も拒否する(self):
+        req = {**_BOLD_HEADER["repeatCell"], "cell": {"user_entered_value": {"stringValue": "x"}}}
+        self._assert_rejected([{"repeatCell": req}], "cell.userEnteredValue")
+
     def test_repeatCellのfieldsは括弧でまとめて指定できる(self):
         req = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(textFormat,backgroundColor), userEnteredFormat.wrapStrategy"}
         result, batch = self._call([{"repeatCell": req}])
@@ -376,6 +387,13 @@ class SheetsBatchUpdateTest(unittest.TestCase):
     def test_フィルタの並べ替えは拒否する(self):
         req = {"filter": {"range": {"sheetId": 0}, "sortSpecs": [{"dimensionIndex": 0, "sortOrder": "ASCENDING"}]}}
         self._assert_rejected([{"setBasicFilter": req}], "sortSpecs")
+        # API は snake_case の書き方も受け付けるため、こちらも拒否する
+        req = {"filter": {"range": {"sheetId": 0}, "sort_specs": [{"dimensionIndex": 0}]}}
+        self._assert_rejected([{"setBasicFilter": req}], "sort_specs")
+
+    def test_cellやfilterがオブジェクトでなければ拒否する(self):
+        self._assert_rejected([{"setBasicFilter": {"filter": 5}}], "filter: オブジェクト")
+        self._assert_rejected([{"repeatCell": {**_BOLD_HEADER["repeatCell"], "cell": "userEnteredValue"}}], "cell: オブジェクト")
 
     def test_条件の数式で外部URLにアクセスする関数は拒否する(self):
         for req in (

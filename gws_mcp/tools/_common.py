@@ -5,6 +5,9 @@ import json
 from gws_mcp.guard import FILE_ID_PATTERN, assert_writable_file
 from gws_mcp.tools import ToolError
 
+# batchUpdate のリクエストを拒否したときのエラー文の書き出し
+BATCH_REJECTED = "リクエストに問題があるため、何も変更していません。"
+
 
 def obj(properties: dict, required: list | None = None) -> dict:
     """想定外の引数を受け付けない object スキーマを作る。"""
@@ -37,6 +40,7 @@ def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> li
     リクエストは入れ子が深く schema.py の object 定義では書き切れないため、文字列で受け取ってここで検査する。
     種類はトップレベルのキーで判定し、許可リストにない種類が1つでもあれば全体を拒否する。
     中身の検査（値を変えないかなど）はサービスごとのモジュールで行う。
+    文字列全体の長さの上限は、呼び出し側のスキーマの maxLength で設ける。
     """
     try:
         requests = json.loads(text)
@@ -60,7 +64,7 @@ def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> li
             problems.append(f"requests[{i}].{kind}: オブジェクトにしてください")
     if problems:
         raise ToolError(
-            "リクエストに問題があるため、何も変更していません。"
+            BATCH_REJECTED
             + "使えるリクエスト: "
             + " ".join(sorted(allowed))
             + "。問題: "

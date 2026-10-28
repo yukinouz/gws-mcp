@@ -16,7 +16,7 @@
 import re
 
 from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
-from gws_mcp.tools._common import created, file_id, obj, parse_batch_requests, writable
+from gws_mcp.tools._common import BATCH_REJECTED, created, file_id, obj, parse_batch_requests, writable
 
 # Google が引数の URL にアクセスする関数。URL にセルの値を埋め込まれると外部に送られる。
 # IMPORTRANGE（Google スプレッドシート間の参照）や HYPERLINK（表示のみ）は外部に出ないので対象外。
@@ -68,6 +68,10 @@ _BATCH_ALLOWED_FIELDS = {
     "updateSheetProperties": {"gridProperties.frozenRowCount", "gridProperties.frozenColumnCount", "tabColorStyle"},
     "updateDimensionProperties": {"pixelSize"},
 }
+# fields に書ける文字。項目名・ピリオド・カンマ・括弧・空白だけ
+_FIELD_MASK_RE = re.compile(r"[A-Za-z0-9_.,()\s]+")
+# setBasicFilter の filter に許すキー。並べ替え（sortSpecs）を含めない
+_BASIC_FILTER_KEYS = frozenset({"range", "filterSpecs", "criteria", "tableId"})
 
 
 def _reject_external_fetch(values):
@@ -90,19 +94,26 @@ def _reject_external_fetch(values):
         )
 
 
-def _split_fields(fields) -> list:
-    """fields（FieldMask）を最上位のカンマで分ける。"a(b,c),d" は ["a(b,c)", "d"] になる。"""
-    if not isinstance(fields, str):
-        return []
+def _split_fields(fields) -> list | None:
+    """fields（FieldMask）を最上位のカンマで分ける。"a(b,c),d" は ["a(b,c)", "d"] になる。
+
+    括弧の対応が崩れているなど形が不正なら None を返す。API 側の解釈に任せず、呼ぶ前に止めるため。
+    """
+    if not isinstance(fields, str) or not _FIELD_MASK_RE.fullmatch(fields):
+        return None
     parts, depth, start = [], 0, 0
     for i, ch in enumerate(fields):
         if ch == "(":
             depth += 1
         elif ch == ")":
             depth -= 1
+            if depth < 0:
+                return None
         elif ch == "," and depth == 0:
             parts.append(fields[start:i].strip())
             start = i + 1
+    if depth != 0:
+        return None
     parts.append(fields[start:].strip())
     return [p for p in parts if p]
 
@@ -111,30 +122,40 @@ def _is_format_field(field: str) -> bool:
     return field == "userEnteredFormat" or field.startswith(("userEnteredFormat.", "userEnteredFormat("))
 
 
+def _check_fields(body: dict, path: str, is_allowed, hint: str) -> list:
+    """fields を分けて、許可しない項目があれば問題の説明を返す。"""
+    fields = _split_fields(body.get("fields"))
+    if not fields:
+        return [f"{path}.fields: {hint} を、項目名とカンマ・括弧だけで指定してください"]
+    return [f"{path}.fields: {f} は使えません（{hint} だけ）" for f in fields if not is_allowed(f)]
+
+
 def _check_batch_request(kind: str, body: dict, path: str) -> list:
     """値や行の位置を変える指定を探し、問題の説明を返す。"""
     problems = []
     if kind == "repeatCell":
-        if "userEnteredValue" in (body.get("cell") or {}):
+        cell = body.get("cell", {})
+        # 値を消さないための本当の防御は fields の検査。cell の検査は、値を渡した意図に気づかせるためのもの
+        if not isinstance(cell, dict):
+            problems.append(f"{path}.cell: オブジェクトにしてください")
+        elif "userEnteredValue" in cell or "user_entered_value" in cell:
             problems.append(f"{path}.cell.userEnteredValue: 値は sheets_write_range で書き込んでください")
         # fields に値の項目や "*" を含めると、cell に値がなくても範囲の値が消える
-        fields = _split_fields(body.get("fields"))
-        if not fields:
-            problems.append(f"{path}.fields: userEnteredFormat で始まる項目を指定してください")
-        for f in fields:
-            if not _is_format_field(f):
-                problems.append(f"{path}.fields: {f} は使えません（userEnteredFormat で始まる項目だけ）")
+        problems += _check_fields(body, path, _is_format_field, "userEnteredFormat で始まる項目")
     elif kind in _BATCH_ALLOWED_FIELDS:
         allowed = _BATCH_ALLOWED_FIELDS[kind]
-        fields = _split_fields(body.get("fields"))
-        if not fields:
-            problems.append(f"{path}.fields: 次のいずれかを指定してください: {' '.join(sorted(allowed))}")
-        for f in fields:
-            if f not in allowed:
-                problems.append(f"{path}.fields: {f} は使えません（{' '.join(sorted(allowed))} だけ）")
-    elif kind == "setBasicFilter" and "sortSpecs" in (body.get("filter") or {}):
-        # 並べ替えは行の位置を変えるため、sortRange と同じく使わせない
-        problems.append(f"{path}.filter.sortSpecs: 並べ替えは使えません")
+        problems += _check_fields(body, path, allowed.__contains__, " ".join(sorted(allowed)))
+    elif kind == "setBasicFilter":
+        # 並べ替え（sortSpecs）は行の位置を変えるため、sortRange と同じく使わせない。
+        # API は sort_specs のような書き方も受け付けるため、禁止するキーではなく許すキーで判定する
+        filter_ = body.get("filter", {})
+        if not isinstance(filter_, dict):
+            problems.append(f"{path}.filter: オブジェクトにしてください")
+        elif extra := set(filter_) - _BASIC_FILTER_KEYS:
+            problems.append(
+                f"{path}.filter: {' '.join(sorted(extra))} は使えません"
+                f"（{' '.join(sorted(_BASIC_FILTER_KEYS))} だけ。並べ替えは使えません）"
+            )
     return problems
 
 
@@ -170,7 +191,7 @@ def _validate_batch_requests(text: str) -> list:
             "外部 URL にアクセスする関数（" + " ".join(_EXTERNAL_FETCH_FUNCTIONS) + "）は使えません: " + "、".join(hits)
         )
     if problems:
-        raise ToolError("リクエストに問題があるため、何も変更していません。問題: " + "、".join(problems))
+        raise ToolError(BATCH_REJECTED + "問題: " + "、".join(problems))
     return requests
 
 
