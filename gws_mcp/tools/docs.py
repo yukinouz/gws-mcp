@@ -28,13 +28,50 @@ def _elements_text(elements: list) -> str:
     return "".join(out)
 
 
-def _tabs_text(tabs: list, depth: int = 0) -> list[str]:
+def _span(el: dict) -> str:
+    return f"[{el.get('startIndex', 0)}-{el.get('endIndex', 0)})"
+
+
+def _elements_structure(elements: list, indent: str = "") -> list[str]:
+    """本文の構造要素を、位置（startIndex〜endIndex）と段落の種類付きの行にする。
+
+    書式のリクエストは位置で範囲を指定するため。位置は API の値（UTF-16 単位）をそのまま返し、
+    LLM が文字数を数えてずれるのを防ぐ。
+    """
+    lines = []
+    for el in elements or []:
+        if "paragraph" in el:
+            para = el["paragraph"]
+            style = (para.get("paragraphStyle") or {}).get("namedStyleType", "NORMAL_TEXT")
+            if "bullet" in para:
+                style += f" 箇条書き(階層{para['bullet'].get('nestingLevel', 0)})"
+            text = "".join((pe.get("textRun") or {}).get("content", "") for pe in para.get("elements", []))
+            lines.append(f"{indent}{_span(el)} {style} {text.rstrip(chr(10))}")
+        elif "table" in el:
+            table = el["table"]
+            lines.append(f"{indent}{_span(el)} 表 {table.get('rows', 0)}行×{table.get('columns', 0)}列")
+            for r, row in enumerate(table.get("tableRows", [])):
+                for c, cell in enumerate(row.get("tableCells", [])):
+                    lines.append(f"{indent}  セル({r},{c}) {_span(cell)}")
+                    lines.extend(_elements_structure(cell.get("content", []), indent + "    "))
+        elif "tableOfContents" in el:
+            lines.append(f"{indent}{_span(el)} 目次")
+    return lines
+
+
+def _tab_body(tab: dict, structure: bool) -> str:
+    body = ((tab.get("documentTab") or {}).get("body") or {}).get("content", [])
+    return "\n".join(_elements_structure(body)) + "\n" if structure else _elements_text(body)
+
+
+def _tabs_text(tabs: list, structure: bool, depth: int = 0) -> list[str]:
     parts = []
     for tab in tabs or []:
-        title = (tab.get("tabProperties") or {}).get("title", "")
-        body = ((tab.get("documentTab") or {}).get("body") or {}).get("content", [])
-        parts.append(f"{'#' * (depth + 2)} タブ: {title}\n\n{_elements_text(body)}")
-        parts.extend(_tabs_text(tab.get("childTabs", []), depth + 1))
+        props = tab.get("tabProperties") or {}
+        # 構造表示では、位置の指定（Location.tabId）に使うタブ ID も示す
+        tab_id = f"（tabId: {props.get('tabId')}）" if structure else ""
+        parts.append(f"{'#' * (depth + 2)} タブ: {props.get('title', '')}{tab_id}\n\n{_tab_body(tab, structure)}")
+        parts.extend(_tabs_text(tab.get("childTabs", []), structure, depth + 1))
     return parts
 
 
@@ -46,11 +83,12 @@ def docs_read(services, args):
         .execute()
     )
     tabs = doc.get("tabs", [])
+    structure = args.get("format") == "structure"
     # タブが 1 つだけならタブ見出しを付けずに本文だけ返す
     if len(tabs) == 1 and not tabs[0].get("childTabs"):
-        text = _elements_text(tabs[0]["documentTab"]["body"].get("content", []))
+        text = _tab_body(tabs[0], structure)
     else:
-        text = "\n".join(_tabs_text(tabs))
+        text = "\n".join(_tabs_text(tabs, structure))
     return f"# {doc.get('title')}\n\n{text}"
 
 
@@ -109,8 +147,20 @@ TOOLS = [
     Tool(
         name="docs_read",
         title="ドキュメントを読む",
-        description="ドキュメントの本文をテキストで取得する（表は | 区切り、複数タブはタブごとに見出しを付ける）。",
-        input_schema=obj({"document_id": _DOCUMENT_ID}, ["document_id"]),
+        description="ドキュメントの本文をテキストで取得する（表は | 区切り、複数タブはタブごとに見出しを付ける）。"
+        "format に structure を指定すると、段落ごとに位置 [startIndex-endIndex)（終わりを含まない）・"
+        "段落の種類（HEADING_2 など）・箇条書きかどうかを返す。docs_batch_update で範囲を指定する前に使う。",
+        input_schema=obj(
+            {
+                "document_id": _DOCUMENT_ID,
+                "format": {
+                    "type": "string",
+                    "enum": ["text", "structure"],
+                    "description": "text（既定・本文のみ）または structure（位置と段落の種類付き）",
+                },
+            },
+            ["document_id"],
+        ),
         handler=docs_read,
         read_only=True,
     ),

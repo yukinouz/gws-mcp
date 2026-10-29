@@ -645,6 +645,81 @@ class DocsSlidesReadTest(unittest.TestCase):
         self.assertIn("はじめに", text)
         self.assertIn("A | B", text)
 
+    def test_構造表示では位置と段落の種類を返す(self):
+        s = FakeServices()
+        s.docs_documents.get.return_value.execute.return_value = {
+            "title": "議事録",
+            "tabs": [
+                {
+                    "documentTab": {
+                        "body": {
+                            "content": [
+                                {
+                                    "startIndex": 1,
+                                    "endIndex": 6,
+                                    "paragraph": {
+                                        "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                                        "elements": [{"textRun": {"content": "決定事項\n"}}],
+                                    },
+                                },
+                                {
+                                    "startIndex": 6,
+                                    "endIndex": 15,
+                                    "paragraph": {
+                                        "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                                        "bullet": {"listId": "l1", "nestingLevel": 1},
+                                        "elements": [{"textRun": {"content": "予算は来期に回す\n"}}],
+                                    },
+                                },
+                                {
+                                    "startIndex": 15,
+                                    "endIndex": 22,
+                                    "table": {
+                                        "rows": 1,
+                                        "columns": 1,
+                                        "tableRows": [
+                                            {
+                                                "tableCells": [
+                                                    {
+                                                        "startIndex": 17,
+                                                        "endIndex": 20,
+                                                        "content": [
+                                                            {
+                                                                "startIndex": 18,
+                                                                "endIndex": 20,
+                                                                "paragraph": {"elements": [{"textRun": {"content": "A\n"}}]},
+                                                            }
+                                                        ],
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    },
+                                },
+                            ]
+                        }
+                    }
+                }
+            ],
+        }
+        text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("[1-6) HEADING_2 決定事項\n", text)
+        self.assertIn("[6-15) NORMAL_TEXT 箇条書き(階層1) 予算は来期に回す", text)
+        self.assertIn("[15-22) 表 1行×1列", text)
+        self.assertIn("  セル(0,0) [17-20)\n    [18-20) NORMAL_TEXT A", text)
+
+    def test_構造表示では複数タブのタブIDを返す(self):
+        s = FakeServices()
+
+        def tab(tab_id, title):
+            return {"tabProperties": {"tabId": tab_id, "title": title}, "documentTab": {"body": {"content": []}}}
+
+        s.docs_documents.get.return_value.execute.return_value = {"title": "d", "tabs": [tab("t.0", "表紙"), tab("t.1", "本文")]}
+        text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("## タブ: 本文（tabId: t.1）", text)
+        plain = call(s, "docs_read", {"document_id": FILE_ID})["content"][0]["text"]
+        self.assertNotIn("tabId", plain)
+
     def test_スライドのテキストを読む(self):
         s = FakeServices()
         s.slides_presentations.get.return_value.execute.return_value = {
