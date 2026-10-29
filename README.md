@@ -48,12 +48,13 @@ OAuth スコープではマイドライブと共有ドライブを区別でき�
 - 共有ドライブの作成・変更
 - カレンダーの予定の削除、カレンダー自体の作成・削除・共有設定
 - Gmail の送信・下書き作成・ラベル変更などの書き込み全般
-- 任意の API を直接呼べる汎用ツール（`sheets_batch_update` は `spreadsheets.batchUpdate`、`docs_batch_update` は `documents.batchUpdate` に固定し、許可リストのリクエストだけを受け付けます）
+- 任意の API を直接呼べる汎用ツール（`sheets_batch_update` は `spreadsheets.batchUpdate`、`docs_batch_update` は `documents.batchUpdate`、`slides_batch_update` は `presentations.batchUpdate` に固定し、許可リストのリクエストだけを受け付けます）
 
 ### その他の安全策
 
 - **スプレッドシート**: 外部 URL にアクセスする関数（`IMPORTDATA` `IMPORTXML` `IMPORTHTML` `IMPORTFEED` `IMAGE`）は禁止しています。書式・並べ替え・検索と置換のツール（`sheets_batch_update`）では、シートの削除や外部への接続はできません。
 - **ドキュメント**: 見出し・箇条書き・表などの編集ツール（`docs_batch_update`）では、画像の挿入（外部 URL の取得）、人物のメンションやコメント（第三者への通知）、タブの削除はできません。リンクは `http://` と `https://` に限ります。
+- **スライド**: スライド・図形・表などの編集ツール（`slides_batch_update`）では、画像・動画・スプレッドシートのグラフの取り込み（外部 URL や別ファイルの読み込み）とコメントはできません。リンクは `http://` と `https://` に限ります。
 - **カレンダー**: 参加者がいる予定の作成・更新では、招待・通知メールを送るか（`send_updates`）の指定を必須にしており、指定がなければ実行しません。LLM には送るかをユーザーに確認してから指定するよう指示しています。書き込み先は自分のメインカレンダーに固定しており、共有カレンダーは編集権限があっても変更しません。
 - **トークン**: 権限 `0600` で保存します（ディレクトリは `0700`）。サーバー実行中にブラウザ認証を始めることはありません。
 - **ログ**: 標準エラー出力だけに出します（stdout は MCP 通信専用）。
@@ -201,12 +202,13 @@ claude mcp add --scope user gws -e PYTHONPATH=/path/to/gws-mcp -- /path/to/gws-m
 
 ### スライド
 
-| ツール                  | 種別 | 説明                           |
-| ----------------------- | ---- | ------------------------------ |
-| `slides_read`           | 読取 | 各スライドのテキストを取得     |
-| `slides_create`         | 書込 | プレゼンテーションを新規作成   |
-| `slides_add_text_slide` | 書込 | タイトル＋本文のスライドを追加 |
-| `slides_replace_text`   | 書込 | テキストを一括置換             |
+| ツール                  | 種別 | 説明                                                   |
+| ----------------------- | ---- | ------------------------------------------------------ |
+| `slides_read`           | 読取 | 各スライドのテキストを取得（ID・位置・大きさ付きも可） |
+| `slides_create`         | 書込 | プレゼンテーションを新規作成                           |
+| `slides_add_text_slide` | 書込 | タイトル＋本文のスライドを追加                         |
+| `slides_replace_text`   | 書込 | テキストを一括置換                                     |
+| `slides_batch_update`   | 書込 | スライド・図形・表・書式などの編集                     |
 
 ## ディレクトリ構成
 
