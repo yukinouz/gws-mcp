@@ -10,7 +10,15 @@ docs_batch_update は許可リストの種類だけを受け付ける。プロ�
 """
 
 from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
-from gws_mcp.tools._common import BATCH_REJECTED, created, file_id, obj, parse_batch_requests, url_problems, writable
+from gws_mcp.tools._common import (
+    BATCH_REJECTED,
+    created,
+    external_ref_problems,
+    file_id,
+    obj,
+    parse_batch_requests,
+    writable,
+)
 
 _DOCUMENT_ID = file_id("ドキュメントの ID")
 _TEXT = {"type": "string", "minLength": 1, "maxLength": 200_000}
@@ -63,7 +71,7 @@ _BATCH_ALLOWED = frozenset(
 )
 _MAX_BATCH_REQUESTS = 200
 _MAX_BATCH_TEXT = 200_000
-# uri は Google が取りに行く URL（画像など）
+# Docs で Google が取りに行く URL は uri（画像）だけ。リンクの url は共通の検査で http(s) に限る
 _BLOCKED_KEYS = {"uri": "外部 URL の取得（画像など）は使えません"}
 
 
@@ -189,7 +197,7 @@ def _validate_batch_requests(text: str) -> list:
     problems = []
     for i, req in enumerate(requests):
         kind, body = next(iter(req.items()))
-        problems += url_problems(body, f"requests[{i}].{kind}", _BLOCKED_KEYS)
+        problems += external_ref_problems(body, f"requests[{i}].{kind}", _BLOCKED_KEYS)
     if problems:
         raise ToolError(BATCH_REJECTED + "問題: " + "、".join(problems))
     return requests
