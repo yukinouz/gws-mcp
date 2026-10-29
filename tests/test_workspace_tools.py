@@ -99,6 +99,10 @@ WRITE_TOOLS = {
         {"presentation_id": FILE_ID, "find": "a", "replace": "b"},
         lambda s: s.slides_presentations.batchUpdate,
     ),
+    "slides_batch_update": (
+        {"presentation_id": FILE_ID, "requests": '[{"deleteObject": {"objectId": "s_12345"}}]'},
+        lambda s: s.slides_presentations.batchUpdate,
+    ),
 }
 
 
@@ -691,6 +695,83 @@ class DocsBatchUpdateTest(unittest.TestCase):
 
     def test_1件でも不正なら全体を拒否する(self):
         self._assert_rejected([{"insertText": {"text": "x", "endOfSegmentLocation": {}}}, {"insertInlineImage": {}}])
+
+
+def _slide_link(link: dict) -> dict:
+    return {
+        "updateTextStyle": {
+            "objectId": "t_12345",
+            "textRange": {"type": "ALL"},
+            "style": {"link": link},
+            "fields": "link",
+        }
+    }
+
+
+class SlidesBatchUpdateTest(unittest.TestCase):
+    def _call(self, requests):
+        """requests を JSON 文字列にして呼ぶ。結果と batchUpdate のモックを返す。"""
+        s = FakeServices({FILE_ID: MY_FILE})
+        s.slides_presentations.batchUpdate.return_value.execute.return_value = {"replies": [{}] * len(requests)}
+        text = requests if isinstance(requests, str) else json.dumps(requests)
+        return call(s, "slides_batch_update", {"presentation_id": FILE_ID, "requests": text}), s.slides_presentations.batchUpdate
+
+    def _assert_rejected(self, requests, *messages):
+        result, batch = self._call(requests)
+        self.assertTrue(result["isError"], result)
+        for m in messages:
+            self.assertIn(m, result["content"][0]["text"])
+        batch.assert_not_called()
+
+    def test_スライドと図形と表と削除のリクエストをそのまま渡しrepliesを返す(self):
+        requests = [
+            {"createSlide": {"objectId": "slide_new1", "slideLayoutReference": {"predefinedLayout": "TITLE_AND_BODY"}}},
+            {"duplicateObject": {"objectId": "p1"}},
+            {"createShape": {"objectId": "box_1", "shapeType": "RECTANGLE", "elementProperties": {"pageObjectId": "slide_new1"}}},
+            {"createTable": {"objectId": "tbl_1", "rows": 2, "columns": 2, "elementProperties": {"pageObjectId": "slide_new1"}}},
+            {"insertText": {"objectId": "box_1", "text": "売上"}},
+            {"updatePageProperties": {"objectId": "slide_new1", "pageProperties": {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": {"blue": 1}}}}}, "fields": "pageBackgroundFill.solidFill.color"}},
+            {"deleteObject": {"objectId": "p2"}},
+            _slide_link({"url": "https://example.com/a?b=c"}),
+            _slide_link({"pageObjectId": "p1"}),
+            _slide_link({"relativeLink": "NEXT_SLIDE"}),
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(batch.call_args.kwargs, {"presentationId": FILE_ID, "body": {"requests": requests}})
+        self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
+
+    def test_外部URLや別ファイルを取り込むリクエストとコメントは拒否する(self):
+        for kind in ("createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
+                     "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
+                     "updateCommentPost", "deleteComment", "deleteCommentReply", "create_image"):
+            with self.subTest(kind=kind):
+                self._assert_rejected([{kind: {}}], f"{kind} は使えません")
+
+    def test_背景画像のURLは書き方にかかわらず拒否する(self):
+        for key in ("contentUrl", "content_url"):
+            with self.subTest(key=key):
+                background = {
+                    "updatePageProperties": {
+                        "objectId": "p1",
+                        "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {key: "https://evil.example/?q=秘密"}}},
+                        "fields": "pageBackgroundFill",
+                    }
+                }
+                self._assert_rejected([background], f"pageBackgroundFill.stretchedPictureFill.{key}")
+
+    def test_入れ子の画像URLとスプレッドシートIDは種類にかかわらず拒否する(self):
+        for key in ("imageUrl", "image_url", "spreadsheetId", "spreadsheet_id"):
+            with self.subTest(key=key):
+                self._assert_rejected([{"insertText": {"objectId": "t_12345", "text": "x", "extra": {key: "x"}}}], f"insertText.extra.{key}")
+
+    def test_httpとhttps以外のリンクは拒否する(self):
+        for url in ("javascript:alert(1)", "ftp://example.com", "", 1, "//example.com"):
+            with self.subTest(url=url):
+                self._assert_rejected([_slide_link({"url": url})], "style.link.url")
+
+    def test_1件でも不正なら全体を拒否する(self):
+        self._assert_rejected([{"insertText": {"objectId": "t_12345", "text": "x"}}, {"createImage": {"url": "https://example.com/a.png"}}])
 
 
 class DocsSlidesReadTest(unittest.TestCase):

@@ -1,16 +1,89 @@
 """スライド ツール。
 
 - 読み取り: 各スライドのテキストを取得できる。オブジェクト ID・位置・大きさ付きでも取得できる
-- 書き込み: 新規作成と、自分が所有するマイドライブのファイルへのスライド追加・一括置換ができる
-- できないこと: 削除、共有ドライブや他人のファイルへの書き込み
+- 書き込み: 新規作成と、自分が所有するマイドライブのファイルへのスライド追加・一括置換、
+  slides_batch_update によるスライド・図形・表・文字の作成・編集・削除ができる
+- できないこと: ファイルの削除、共有ドライブや他人のファイルへの書き込み
+
+slides_batch_update は許可リストの種類だけを受け付ける。プロンプトインジェクションで悪用されても
+プレゼンテーションの外に影響が出ないよう、Google が外部 URL を取りに行く操作、別のファイルの中身を取り込む操作、
+第三者に通知が届く操作は含めない。
 """
 
 import uuid
 
-from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool
-from gws_mcp.tools._common import created, file_id, obj, writable
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
+from gws_mcp.tools._common import (
+    BATCH_REJECTED,
+    created,
+    external_ref_problems,
+    file_id,
+    obj,
+    parse_batch_requests,
+    writable,
+)
 
 _PRESENTATION_ID = file_id("プレゼンテーションの ID")
+
+# slides_batch_update で使えるリクエスト。プレゼンテーションの中で完結する編集だけを含める。
+# Google が外部 URL を取りに行くもの（createImage・replaceImage・replaceAllShapesWithImage）、
+# 別のファイルの中身を取り込むもの（createSheetsChart・replaceAllShapesWithSheetsChart・refreshSheetsChart・createVideo）、
+# 第三者に通知が届くもの（insertComment などのコメント）は含めない
+_BATCH_ALLOWED = frozenset(
+    {
+        # スライド
+        "createSlide",
+        "duplicateObject",
+        "updateSlidesPosition",
+        "updateSlideProperties",
+        "deleteObject",
+        # 図形と線
+        "createShape",
+        "createLine",
+        "updatePageElementTransform",
+        "updateShapeProperties",
+        "updateLineProperties",
+        "updateLineCategory",
+        "rerouteLine",
+        "groupObjects",
+        "ungroupObjects",
+        "updatePageElementsZOrder",
+        "updatePageElementAltText",
+        # 文字と段落
+        "insertText",
+        "deleteText",
+        "replaceAllText",
+        "updateTextStyle",
+        "updateParagraphStyle",
+        "createParagraphBullets",
+        "deleteParagraphBullets",
+        # 表
+        "createTable",
+        "insertTableRows",
+        "insertTableColumns",
+        "deleteTableRow",
+        "deleteTableColumn",
+        "updateTableCellProperties",
+        "updateTableBorderProperties",
+        "updateTableColumnProperties",
+        "updateTableRowProperties",
+        "mergeTableCells",
+        "unmergeTableCells",
+        # ページの背景と、すでにある画像・動画の見た目
+        "updatePageProperties",
+        "updateImageProperties",
+        "updateVideoProperties",
+    }
+)
+_MAX_BATCH_REQUESTS = 200
+_MAX_BATCH_TEXT = 200_000
+# 許可した種類の中にも入れられる、外部 URL や別ファイルの ID のキー。
+# 背景画像（updatePageProperties の stretchedPictureFill.contentUrl）は、Google が挿入時に URL を取りに行く
+_BLOCKED_KEYS = {
+    "contentUrl": "画像の URL は使えません（Google が外部 URL を取りに行くため）",
+    "imageUrl": "画像の URL は使えません（Google が外部 URL を取りに行くため）",
+    "spreadsheetId": "別のファイル（スプレッドシート）の取り込みは使えません",
+}
 
 
 def _text_of(text: dict | None) -> str:
@@ -260,6 +333,32 @@ def slides_replace_text(services, args):
     return {"id": meta["id"], "name": meta.get("name"), "occurrencesChanged": changed}
 
 
+def _validate_batch_requests(text: str) -> list:
+    """slides_batch_update のリクエストを検査し、1つでも問題があれば API を呼ばずに全体を拒否する。"""
+    requests = parse_batch_requests(text, _BATCH_ALLOWED, _MAX_BATCH_REQUESTS)
+    problems = []
+    for i, req in enumerate(requests):
+        kind, body = next(iter(req.items()))
+        problems += external_ref_problems(body, f"requests[{i}].{kind}", _BLOCKED_KEYS)
+    if problems:
+        raise ToolError(BATCH_REJECTED + "問題: " + "、".join(problems))
+    return requests
+
+
+def slides_batch_update(services, args):
+    # 入力の検査は通信が要らないので、ガードより先に行う
+    requests = _validate_batch_requests(args["requests"])
+    meta = writable(services, args["presentation_id"])
+    res = (
+        services.get("slides")
+        .presentations()
+        .batchUpdate(presentationId=meta["id"], body={"requests": requests})
+        .execute()
+    )
+    # createSlide や duplicateObject などで作られた ID を後で使えるよう、replies を返す
+    return {"replies": res.get("replies", [])}
+
+
 TOOLS = [
     Tool(
         name="slides_read",
@@ -329,5 +428,39 @@ TOOLS = [
         read_only=False,
         guard=GUARD_MYDRIVE,
         idempotent=True,
+    ),
+    Tool(
+        name="slides_batch_update",
+        title="スライド・図形・表などの編集",
+        description="Slides API の presentations.batchUpdate で、スライドの追加・複製・並べ替え・削除、図形・線・表の作成、"
+        "位置と大きさ、文字・段落・箇条書きの書式、背景色などの編集を行う。対象は自分が所有するマイドライブのファイルに限る。"
+        "requests にはリクエストの配列を JSON 文字列で渡す（" + str(_MAX_BATCH_REQUESTS) + " 件まで）。"
+        "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"
+        "対象の objectId・文字の位置・レイアウトの ID は slides_read の format: structure で調べる。"
+        "createSlide・createShape などで objectId（英数字とアンダースコアで 5〜50 文字）を指定すると、"
+        "同じ requests の後ろのリクエストでその ID を使える。リクエストは配列の順に適用される。"
+        "位置と大きさは unit に PT を指定すると pt で書ける。"
+        "リンク（updateTextStyle の style.link）は http:// か https:// の url、またはスライド内（pageObjectId・slideIndex・"
+        "relativeLink）に限る。画像・動画・スプレッドシートのグラフの挿入や差し替え、背景画像、コメントはできない。"
+        "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
+        input_schema=obj(
+            {
+                "presentation_id": _PRESENTATION_ID,
+                "requests": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": _MAX_BATCH_TEXT,
+                    "description": "リクエストの配列の JSON 文字列"
+                    '（例: [{"createSlide": {"objectId": "slide_new1", "slideLayoutReference": '
+                    '{"predefinedLayout": "TITLE_AND_BODY"}}}, {"updateTextStyle": {"objectId": "t1", '
+                    '"textRange": {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 4}, '
+                    '"style": {"bold": true}, "fields": "bold"}}]）',
+                },
+            },
+            ["presentation_id", "requests"],
+        ),
+        handler=slides_batch_update,
+        read_only=False,
+        guard=GUARD_MYDRIVE,
     ),
 ]
