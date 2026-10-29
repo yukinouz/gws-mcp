@@ -8,7 +8,7 @@
 slides_batch_update は許可リストの種類だけを受け付ける。プロンプトインジェクションで悪用されても
 プレゼンテーションの外に影響が出ないよう、Google が外部 URL を取りに行く操作と、第三者に通知が届く操作は含めない。
 スプレッドシートのグラフは、参照先が書き込みガードを通る（自分が所有するマイドライブの）ファイルのときだけ取り込む。
-共有ドライブや他人のファイルの中身を、共有中のプレゼンテーションへ持ち出させないため。
+共有ドライブや他人のファイルの最新のデータに、リンクし続けるグラフを作らせないため。
 """
 
 import uuid
@@ -370,8 +370,15 @@ def _validate_batch_requests(text: str) -> tuple[list, set, set]:
             # 直下の spreadsheetId はガードで判定するため、拒否するキーの検査から外す
             body = {k: v for k, v in body.items() if key_name(k) != "spreadsheetid"}
         elif kind == "refreshSheetsChart":
-            refresh_ids.add(body.get("objectId"))
+            ids = [v for k, v in body.items() if key_name(k) == "objectid"]
+            if len(ids) != 1 or not isinstance(ids[0], str):
+                problems.append(f"{path}.objectId: 更新するグラフの objectId を 1 つ指定してください")
+            else:
+                refresh_ids.add(ids[0])
         problems += external_ref_problems(body, path, _BLOCKED_KEYS)
+    # 更新するグラフの参照先は適用前のプレゼンテーションで調べるため、同じ batch で ID を付け替えられないようにする
+    if refresh_ids and any(next(iter(req)) != "refreshSheetsChart" for req in requests):
+        problems.append("refreshSheetsChart は、ほかの種類のリクエストと同じ requests に入れられません")
     if problems:
         raise ToolError(BATCH_REJECTED + "問題: " + "、".join(problems))
     return requests, spreadsheet_ids, refresh_ids
@@ -395,8 +402,8 @@ def _refresh_sources(services, presentation_id: str, object_ids: set) -> set:
     """
     pres = services.get("slides").presentations().get(presentationId=presentation_id).execute()
     sources = {}
-    for slide in pres.get("slides", []):
-        sources.update(_chart_sources(slide.get("pageElements", [])))
+    for page in pres.get("slides", []) + pres.get("layouts", []) + pres.get("masters", []):
+        sources.update(_chart_sources(page.get("pageElements", [])))
     missing = sorted(str(i) for i in object_ids if i not in sources)
     if missing:
         raise ToolError(BATCH_REJECTED + "更新するスプレッドシートのグラフが見つかりません: " + "、".join(missing))
@@ -404,12 +411,15 @@ def _refresh_sources(services, presentation_id: str, object_ids: set) -> set:
 
 
 def _assert_chart_sources(services, spreadsheet_ids: set) -> None:
+    """参照先のスプレッドシートが書き込みガードを通るか確かめ、通らなければ batch 全体を拒否する。"""
     for spreadsheet_id in sorted(spreadsheet_ids, key=str):
         try:
             writable(services, spreadsheet_id)
         except ToolError as e:
+            # ガードの文の後半（「読み取り専用です」など）は書き込みの理由で、読み込むだけのグラフには当てはまらない
+            reason = str(e).split("。")[0] + "。"
             raise ToolError(
-                BATCH_REJECTED + "グラフの参照先は、自分が所有するマイドライブのスプレッドシートに限ります: " + str(e)
+                BATCH_REJECTED + "グラフの参照先は、自分が所有するマイドライブのスプレッドシートに限ります: " + reason
             ) from None
 
 
@@ -516,6 +526,7 @@ TOOLS = [
         "またはスライド内（pageObjectId・slideIndex・relativeLink）に限る。"
         "スプレッドシートのグラフ（createSheetsChart・replaceAllShapesWithSheetsChart・refreshSheetsChart）は、"
         "参照先が自分の所有するマイドライブのスプレッドシートのときだけ使える（chartId は sheets_get_metadata で調べる）。"
+        "refreshSheetsChart はほかの種類と同じ requests に入れられない。"
         "画像・動画の挿入や差し替え、背景画像、コメントはできない。"
         "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
         input_schema=obj(

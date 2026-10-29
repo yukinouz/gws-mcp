@@ -863,8 +863,21 @@ class SlidesChartTest(unittest.TestCase):
         s = FakeServices(files)
         s.slides_presentations.batchUpdate.return_value.execute.return_value = {"replies": []}
         s.slides_presentations.get.return_value.execute.return_value = pres or {}
+        self.services = s
         result = call(s, "slides_batch_update", {"presentation_id": FILE_ID, "requests": json.dumps(requests)})
         return result, s.slides_presentations.batchUpdate
+
+    def _assert_rejected(self, requests, message, **kwargs):
+        result, batch = self._call(requests, **kwargs)
+        self.assertTrue(result["isError"], result)
+        self.assertIn(message, result["content"][0]["text"])
+        batch.assert_not_called()
+
+    @staticmethod
+    def _pres(spreadsheet_id, page="slides"):
+        chart = {"objectId": "chart_1", "sheetsChart": {"spreadsheetId": spreadsheet_id, "chartId": 1}}
+        group = {"objectId": "g_1", "elementGroup": {"children": [chart]}}
+        return {page: [{"objectId": "p1", "pageElements": [group]}]}
 
     def _create(self, spreadsheet_id=SHEET_ID, **extra):
         return {"createSheetsChart": {"spreadsheetId": spreadsheet_id, "chartId": 1, "linkingMode": "LINKED", **extra}}
@@ -874,14 +887,16 @@ class SlidesChartTest(unittest.TestCase):
         result, batch = self._call([self._create(), replace])
         self.assertFalse(result["isError"], result)
         batch.assert_called_once()
+        checked = {c.kwargs["fileId"] for c in self.services.apis["drive"].files.return_value.get.call_args_list}
+        self.assertIn(SHEET_ID, checked)
 
     def test_共有ドライブや他人のスプレッドシートのグラフは取り込まない(self):
         for sheet in (SHARED_DRIVE_FILE, OTHERS_FILE):
             with self.subTest(sheet=sheet):
-                result, batch = self._call([self._create()], sheet=sheet)
-                self.assertTrue(result["isError"], result)
-                self.assertIn("グラフの参照先", result["content"][0]["text"])
-                batch.assert_not_called()
+                self._assert_rejected([self._create()], "グラフの参照先", sheet=sheet)
+        # 1 件でも参照先が通らなければ全体を拒否する
+        self._assert_rejected([self._create(), self._create(SHARED_SHEET_ID)], "共有ドライブ")
+        self._assert_rejected([self._create("../bad")], "グラフの参照先")
 
     def test_参照先は1つの文字列で直下に指定する(self):
         cases = [
@@ -891,28 +906,35 @@ class SlidesChartTest(unittest.TestCase):
             # 入れ子の中の spreadsheetId は、直下に正しい ID があっても拒否する
             self._create(elementProperties={"spreadsheetId": SHARED_SHEET_ID}),
         ]
-        for request in cases:
+        messages = ["ID を 1 つ指定", "ID を 1 つ指定", "ID を 1 つ指定", "elementProperties.spreadsheetId"]
+        for request, message in zip(cases, messages):
             with self.subTest(request=request):
-                result, batch = self._call([request])
-                self.assertTrue(result["isError"], result)
-                batch.assert_not_called()
+                self._assert_rejected([request], message)
 
     def test_グラフの更新は参照先を調べてから行う(self):
-        def pres(spreadsheet_id):
-            chart = {"objectId": "chart_1", "sheetsChart": {"spreadsheetId": spreadsheet_id, "chartId": 1}}
-            group = {"objectId": "g_1", "elementGroup": {"children": [chart]}}
-            return {"slides": [{"objectId": "p1", "pageElements": [group]}]}
-
         refresh = [{"refreshSheetsChart": {"objectId": "chart_1"}}]
-        result, batch = self._call(refresh, pres=pres(SHEET_ID))
-        self.assertFalse(result["isError"], result)
-        batch.assert_called_once()
-        for pres_body, message in ((pres(SHARED_SHEET_ID), "グラフの参照先"), ({"slides": []}, "chart_1")):
-            with self.subTest(message=message):
-                result, batch = self._call(refresh, pres=pres_body)
-                self.assertTrue(result["isError"], result)
-                self.assertIn(message, result["content"][0]["text"])
-                batch.assert_not_called()
+        for page in ("slides", "layouts", "masters"):
+            with self.subTest(page=page):
+                result, batch = self._call(refresh, pres=self._pres(SHEET_ID, page))
+                self.assertFalse(result["isError"], result)
+                batch.assert_called_once()
+        self._assert_rejected(refresh, "グラフの参照先", pres=self._pres(SHARED_SHEET_ID))
+        self._assert_rejected(refresh, "chart_1", pres={"slides": []})
+
+    def test_グラフの更新のobjectIdは1つの文字列で指定する(self):
+        for body in ({"objectId": "chart_1", "object_id": "chart_2"}, {}, {"objectId": ["chart_1"]}):
+            with self.subTest(body=body):
+                self._assert_rejected([{"refreshSheetsChart": body}], "objectId を 1 つ指定", pres=self._pres(SHEET_ID))
+
+    def test_グラフの更新はほかの種類と同じrequestsに入れない(self):
+        # 同じ batch で ID を付け替えると、適用前に調べた参照先と実際に更新するグラフが食い違うため
+        swap = [
+            {"deleteObject": {"objectId": "chart_1"}},
+            {"duplicateObject": {"objectId": "shared_chart", "objectIds": {"shared_chart": "chart_1"}}},
+            {"refreshSheetsChart": {"objectId": "chart_1"}},
+        ]
+        self._assert_rejected(swap, "ほかの種類", pres=self._pres(SHEET_ID))
+        self._assert_rejected([self._create(), {"refreshSheetsChart": {"objectId": "chart_1"}}], "ほかの種類")
 
 
 class DocsSlidesReadTest(unittest.TestCase):

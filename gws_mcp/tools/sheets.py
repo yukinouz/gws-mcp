@@ -77,7 +77,7 @@ _BATCH_ALLOWED = frozenset(
         "updateEmbeddedObjectBorder",
         "deleteEmbeddedObject",
         # 行・列・範囲とシートの複製。ファイルの中で完結し、版の履歴から戻せる。
-        # シート丸ごとの削除（deleteSheet）は、1 件で失われる量が大きいため含めない
+        # シート丸ごとの削除（deleteSheet）は、中身に加えてほかのシートの数式・グラフ・名前付き範囲からの参照も壊すため含めない
         "insertDimension",
         "appendDimension",
         "moveDimension",
