@@ -341,7 +341,7 @@ class SheetsBatchUpdateTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
 
     def test_許可リスト外のリクエストは拒否する(self):
-        for kind in ("deleteSheet", "deleteRange", "deleteDimension", "updateCells", "appendCells", "pasteData",
+        for kind in ("deleteSheet", "updateCells", "appendCells", "pasteData",
                      "copyPaste", "cutPaste", "addProtectedRange", "updateProtectedRange",
                      "addDataSource", "refreshDataSource", "addNamedRange", "updateSpreadsheetProperties",
                      "insertComment"):
@@ -356,6 +356,21 @@ class SheetsBatchUpdateTest(unittest.TestCase):
             {"updateChartSpec": {"chartId": 1, "spec": chart["spec"]}},
             {"updateEmbeddedObjectPosition": {"objectId": 1, "newPosition": {"newSheet": True}, "fields": "newSheet"}},
             {"deleteEmbeddedObject": {"objectId": 2}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_行と列と範囲の挿入_移動_削除とシートの複製は通す(self):
+        rows = {"sheetId": 0, "dimension": "ROWS", "startIndex": 1, "endIndex": 3}
+        requests = [
+            {"insertDimension": {"range": rows, "inheritFromBefore": True}},
+            {"appendDimension": {"sheetId": 0, "dimension": "COLUMNS", "length": 2}},
+            {"moveDimension": {"source": rows, "destinationIndex": 5}},
+            {"deleteDimension": {"range": rows}},
+            {"insertRange": {"range": {"sheetId": 0, "endRowIndex": 1}, "shiftDimension": "ROWS"}},
+            {"deleteRange": {"range": {"sheetId": 0, "endRowIndex": 1}, "shiftDimension": "ROWS"}},
+            {"duplicateSheet": {"sourceSheetId": 0, "newSheetName": "コピー"}},
         ]
         result, batch = self._call(requests)
         self.assertFalse(result["isError"], result)
@@ -416,8 +431,8 @@ class SheetsBatchUpdateTest(unittest.TestCase):
 
     def test_シートと列幅のfieldsは許可した項目を通す(self):
         cases = {
-            "updateSheetProperties": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount,tabColorStyle",
-            "updateDimensionProperties": "pixelSize",
+            "updateSheetProperties": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount,tabColorStyle,hidden",
+            "updateDimensionProperties": "pixelSize,hiddenByUser",
         }
         for kind, fields in cases.items():
             with self.subTest(kind=kind):
@@ -427,8 +442,8 @@ class SheetsBatchUpdateTest(unittest.TestCase):
 
     def test_シートと列幅のfieldsは許可した項目だけ(self):
         cases = {
-            "updateSheetProperties": ("title", "gridProperties.rowCount", "hidden", "*", ""),
-            "updateDimensionProperties": ("hiddenByUser", "pixelSize,hiddenByUser", "*", ""),
+            "updateSheetProperties": ("title", "gridProperties.rowCount", "*", ""),
+            "updateDimensionProperties": ("developerMetadata", "pixelSize,developerMetadata", "*", ""),
         }
         for kind, fields_list in cases.items():
             for fields in fields_list:

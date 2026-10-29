@@ -2,7 +2,7 @@
 
 - 読み取り: シート構成と範囲の値を取得できる
 - 書き込み: 新規作成と、自分が所有するマイドライブのファイルへの書き込み・行の追記・シート追加ができる
-- できないこと: 削除、共有ドライブや他人のファイルへの書き込み
+- できないこと: ファイルとシート丸ごとの削除、共有ドライブや他人のファイルへの書き込み
 
 値は既定で RAW（入力をそのまま文字列・数値として保存）で書き込む。
 電話番号（"+81-..."）や "=" で始まる文章が意図せず数式になるのを防ぐため。
@@ -76,6 +76,15 @@ _BATCH_ALLOWED = frozenset(
         "updateEmbeddedObjectPosition",
         "updateEmbeddedObjectBorder",
         "deleteEmbeddedObject",
+        # 行・列・範囲とシートの複製。ファイルの中で完結し、版の履歴から戻せる。
+        # シート丸ごとの削除（deleteSheet）は、1 件で失われる量が大きいため含めない
+        "insertDimension",
+        "appendDimension",
+        "moveDimension",
+        "deleteDimension",
+        "insertRange",
+        "deleteRange",
+        "duplicateSheet",
     }
 )
 # 許可した種類の中にも入れられる、外部データにつながるキー。
@@ -85,8 +94,14 @@ _MAX_BATCH_REQUESTS = 200
 _MAX_BATCH_TEXT = 200_000
 # fields（上書きする項目）を絞る種類と、許可する項目。それ以外の項目は表示や構造を大きく変えるため
 _BATCH_ALLOWED_FIELDS = {
-    "updateSheetProperties": {"gridProperties.frozenRowCount", "gridProperties.frozenColumnCount", "tabColorStyle"},
-    "updateDimensionProperties": {"pixelSize"},
+    "updateSheetProperties": {
+        "gridProperties.frozenRowCount",
+        "gridProperties.frozenColumnCount",
+        "tabColorStyle",
+        "hidden",
+    },
+    # 隠した行・列は画面で分かるため、隠すことも許可する
+    "updateDimensionProperties": {"pixelSize", "hiddenByUser"},
 }
 # fields の項目名。英数字とアンダースコアの名前をピリオドでつなぐ
 _FIELD_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
@@ -416,19 +431,22 @@ TOOLS = [
     Tool(
         name="sheets_batch_update",
         title="書式・並べ替え・置換",
-        description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換・グラフの作成と編集を行う。"
+        description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換・グラフの作成と編集、"
+        "行・列の挿入と削除を行う。"
         "対象は自分が所有するマイドライブのファイルに限る。"
         "requests にはリクエストの配列を JSON 文字列で渡す（" + str(_MAX_BATCH_REQUESTS) + " 件まで）。"
         "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"
         "範囲は GridRange（sheetId と 0 始まり・終わりを含まない行・列の番号）で指定し、"
         "sheetId は sheets_get_metadata で取得する。"
         "repeatCell の fields は userEnteredFormat で始まる項目だけ、"
-        "updateSheetProperties の fields は gridProperties.frozenRowCount・gridProperties.frozenColumnCount・tabColorStyle だけ、"
-        "updateDimensionProperties の fields は pixelSize だけを指定できる。"
+        "updateSheetProperties の fields は gridProperties.frozenRowCount・gridProperties.frozenColumnCount・"
+        "tabColorStyle・hidden だけ、updateDimensionProperties の fields は pixelSize・hiddenByUser だけを指定できる。"
+        "行・列・範囲の挿入・移動・削除とシートの複製はできるが、シート丸ごとの削除はできない。"
         "repeatCell での値（userEnteredValue）の書き込みは拒否される（値は sheets_write_range で書き込む）。"
         "グラフ（addChart など）のデータ範囲は同じスプレッドシートの GridRange で指定する。"
         "グラフの ID（chartId・objectId）は sheets_get_metadata で取得する。"
-        "外部 URL にアクセスする " + "・".join(_EXTERNAL_FETCH_FUNCTIONS) + " を含むリクエストと、データソース（dataSourceId）は拒否される。"
+        "外部 URL にアクセスする " + "・".join(_EXTERNAL_FETCH_FUNCTIONS) + " を含むリクエストと、"
+        "データソース（dataSourceId）は拒否される。"
         "mergeCells は左上以外のセルの値を消すため、値のない範囲か、消えてよいことを確かめてから使う。"
         "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
         input_schema=obj(
