@@ -52,7 +52,7 @@ OAuth スコープではマイドライブと共有ドライブを区別でき�
 
 ### その他の安全策
 
-- **スプレッドシート**: 外部 URL にアクセスする関数（`IMPORTDATA` `IMPORTXML` `IMPORTHTML` `IMPORTFEED` `IMAGE`）は禁止しています。書式のツール（`sheets_batch_update`）では、値（`userEnteredValue`）の書き込みと、`fields` での値の上書き、並べ替えを拒否し、値を変えられないようにしています（セルの結合だけは、Google の仕様で左上以外の値が消えます）。
+- **スプレッドシート**: 外部 URL にアクセスする関数（`IMPORTDATA` `IMPORTXML` `IMPORTHTML` `IMPORTFEED` `IMAGE`）は禁止しています。書式・並べ替え・検索と置換のツール（`sheets_batch_update`）では、シートの削除や外部への接続はできません。
 - **カレンダー**: 参加者がいる予定の作成・更新では、招待・通知メールを送るか（`send_updates`）の指定を必須にしており、指定がなければ実行しません。LLM には送るかをユーザーに確認してから指定するよう指示しています。書き込み先は自分のメインカレンダーに固定しており、共有カレンダーは編集権限があっても変更しません。
 - **トークン**: 権限 `0600` で保存します（ディレクトリは `0700`）。サーバー実行中にブラウザ認証を始めることはありません。
 - **ログ**: 標準エラー出力だけに出します（stdout は MCP 通信専用）。
@@ -178,15 +178,15 @@ claude mcp add --scope user gws -e PYTHONPATH=/path/to/gws-mcp -- /path/to/gws-m
 
 ### スプレッドシート
 
-| ツール                | 種別 | 説明                       |
-| --------------------- | ---- | -------------------------- |
-| `sheets_get_metadata` | 読取 | シート構成を取得           |
-| `sheets_read_range`   | 読取 | 範囲の値を取得             |
-| `sheets_create`       | 書込 | スプレッドシートを新規作成 |
-| `sheets_write_range`  | 書込 | 範囲に値を書き込み         |
-| `sheets_append_rows`  | 書込 | 行を追記                   |
-| `sheets_add_sheet`    | 書込 | シート（タブ）を追加       |
-| `sheets_batch_update` | 書込 | 書式を設定（値は変えない） |
+| ツール                | 種別 | 説明                             |
+| --------------------- | ---- | -------------------------------- |
+| `sheets_get_metadata` | 読取 | シート構成を取得                 |
+| `sheets_read_range`   | 読取 | 範囲の値を取得                   |
+| `sheets_create`       | 書込 | スプレッドシートを新規作成       |
+| `sheets_write_range`  | 書込 | 範囲に値を書き込み               |
+| `sheets_append_rows`  | 書込 | 行を追記                         |
+| `sheets_add_sheet`    | 書込 | シート（タブ）を追加             |
+| `sheets_batch_update` | 書込 | 書式の設定・並べ替え・検索と置換 |
 
 ### ドキュメント
 

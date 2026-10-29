@@ -9,8 +9,9 @@
 数式は USER_ENTERED を指定すれば使える。ただし外部 URL にアクセスする関数
 （IMPORTDATA など）は、シートの内容を外部に送信できてしまうため、指定にかかわらず拒否する。
 
-書式は sheets_batch_update で変えられる。値の書き込みを sheets_write_range の検査に一本化するため、
-許可リストの種類だけを受け付け、値や行の位置を変える指定は拒否する。
+書式・並べ替え・検索と置換は sheets_batch_update で行える。許可リストの種類だけを受け付け、
+削除や外部への接続はできない。repeatCell は範囲全体の値を一度に上書きできるため値を受け付けず、
+値の書き込みは RAW と USER_ENTERED を選べる sheets_write_range に寄せる。
 """
 
 import re
@@ -44,7 +45,7 @@ _FORMULA_NOTE = (
 )
 _SHEET_TITLE = {"type": "string", "minLength": 1, "maxLength": 100}
 
-# sheets_batch_update で使える書式のリクエスト。削除・値の変更・外部接続・権限の変更は含めない
+# sheets_batch_update で使えるリクエスト。削除・外部接続・権限の変更は含めない
 _BATCH_ALLOWED = frozenset(
     {
         "repeatCell",
@@ -59,6 +60,8 @@ _BATCH_ALLOWED = frozenset(
         "setDataValidation",
         "mergeCells",
         "unmergeCells",
+        "sortRange",
+        "findReplace",
     }
 )
 _MAX_BATCH_REQUESTS = 200
@@ -72,8 +75,6 @@ _BATCH_ALLOWED_FIELDS = {
 _FIELD_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 # fields の括弧の入れ子の上限。書式の指定ではこれより深くならない
 _MAX_FIELD_DEPTH = 5
-# setBasicFilter の filter に許すキー。並べ替え（sortSpecs）を含めない
-_BASIC_FILTER_KEYS = frozenset({"range", "filterSpecs", "criteria", "tableId"})
 
 
 def _reject_external_fetch(values):
@@ -151,7 +152,7 @@ def _check_fields(body: dict, path: str, is_allowed, hint: str) -> list:
 
 
 def _check_batch_request(kind: str, body: dict, path: str) -> list:
-    """値や行の位置を変える指定を探し、問題の説明を返す。"""
+    """値を書き込む指定や、許可しない fields を探し、問題の説明を返す。"""
     problems = []
     if kind == "repeatCell":
         cell = body.get("cell", {})
@@ -165,17 +166,6 @@ def _check_batch_request(kind: str, body: dict, path: str) -> list:
     elif kind in _BATCH_ALLOWED_FIELDS:
         allowed = _BATCH_ALLOWED_FIELDS[kind]
         problems += _check_fields(body, path, allowed.__contains__, " ".join(sorted(allowed)))
-    elif kind == "setBasicFilter":
-        # 並べ替え（sortSpecs）は行の位置を変えるため、sortRange と同じく使わせない。
-        # API は sort_specs のような書き方も受け付けるため、禁止するキーではなく許すキーで判定する
-        filter_ = body.get("filter", {})
-        if not isinstance(filter_, dict):
-            problems.append(f"{path}.filter: オブジェクトにしてください")
-        elif extra := set(filter_) - _BASIC_FILTER_KEYS:
-            problems.append(
-                f"{path}.filter: {' '.join(sorted(extra))} は使えません"
-                f"（{' '.join(sorted(_BASIC_FILTER_KEYS))} だけ。並べ替えは使えません）"
-            )
     return problems
 
 
@@ -406,8 +396,8 @@ TOOLS = [
     ),
     Tool(
         name="sheets_batch_update",
-        title="書式を設定",
-        description="Sheets API の spreadsheets.batchUpdate で書式を設定する（値は変えない）。"
+        title="書式・並べ替え・置換",
+        description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換を行う。"
         "対象は自分が所有するマイドライブのファイルに限る。"
         "requests にはリクエストの配列を JSON 文字列で渡す（" + str(_MAX_BATCH_REQUESTS) + " 件まで）。"
         "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"
@@ -416,7 +406,8 @@ TOOLS = [
         "repeatCell の fields は userEnteredFormat で始まる項目だけ、"
         "updateSheetProperties の fields は gridProperties.frozenRowCount・gridProperties.frozenColumnCount・tabColorStyle だけ、"
         "updateDimensionProperties の fields は pixelSize だけを指定できる。"
-        "値（userEnteredValue）の書き込みと、setBasicFilter の並べ替え（sortSpecs）は拒否される。"
+        "repeatCell での値（userEnteredValue）の書き込みは拒否される（値は sheets_write_range で書き込む）。"
+        "外部 URL にアクセスする " + "・".join(_EXTERNAL_FETCH_FUNCTIONS) + " を含むリクエストは拒否される。"
         "mergeCells は左上以外のセルの値を消すため、値のない範囲か、消えてよいことを確かめてから使う。"
         "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
         input_schema=obj(

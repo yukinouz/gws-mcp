@@ -328,7 +328,7 @@ class SheetsBatchUpdateTest(unittest.TestCase):
 
     def test_許可リスト外のリクエストは拒否する(self):
         for kind in ("deleteSheet", "deleteRange", "deleteDimension", "updateCells", "appendCells", "pasteData",
-                     "findReplace", "copyPaste", "cutPaste", "sortRange", "addProtectedRange", "updateProtectedRange",
+                     "copyPaste", "cutPaste", "addProtectedRange", "updateProtectedRange",
                      "addDataSource", "refreshDataSource", "addChart", "addNamedRange", "updateSpreadsheetProperties"):
             with self.subTest(kind=kind):
                 self._assert_rejected([{kind: {}}], f"{kind} は使えません")
@@ -408,15 +408,22 @@ class SheetsBatchUpdateTest(unittest.TestCase):
         self.assertFalse(result["isError"], result)
         batch.assert_called_once()
 
-    def test_フィルタの並べ替えは拒否する(self):
-        req = {"filter": {"range": {"sheetId": 0}, "sortSpecs": [{"dimensionIndex": 0, "sortOrder": "ASCENDING"}]}}
-        self._assert_rejected([{"setBasicFilter": req}], "sortSpecs")
-        # API は snake_case の書き方も受け付けるため、こちらも拒否する
-        req = {"filter": {"range": {"sheetId": 0}, "sort_specs": [{"dimensionIndex": 0}]}}
-        self._assert_rejected([{"setBasicFilter": req}], "sort_specs")
+    def test_並べ替えと検索置換は通す(self):
+        sort = [{"dimensionIndex": 0, "sortOrder": "ASCENDING"}]
+        requests = [
+            {"sortRange": {"range": {"sheetId": 0, "startRowIndex": 1}, "sortSpecs": sort}},
+            {"setBasicFilter": {"filter": {"range": {"sheetId": 0}, "sortSpecs": sort}}},
+            {"findReplace": {"find": "旧", "replacement": "新", "allSheets": True}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
 
-    def test_cellやfilterがオブジェクトでなければ拒否する(self):
-        self._assert_rejected([{"setBasicFilter": {"filter": 5}}], "filter: オブジェクト")
+    def test_置換後の文字列で外部URLにアクセスする関数は拒否する(self):
+        req = {"findReplace": {"find": "x", "replacement": '=IMPORTDATA("https://example.com")', "allSheets": True}}
+        self._assert_rejected([req], "外部 URL")
+
+    def test_cellがオブジェクトでなければ拒否する(self):
         self._assert_rejected([{"repeatCell": {**_BOLD_HEADER["repeatCell"], "cell": "userEnteredValue"}}], "cell: オブジェクト")
 
     def test_条件の数式で外部URLにアクセスする関数は拒否する(self):
