@@ -86,6 +86,10 @@ WRITE_TOOLS = {
         lambda s: s.apis["sheets"].spreadsheets.return_value.batchUpdate,
     ),
     "docs_append_text": ({"document_id": FILE_ID, "text": "x"}, lambda s: s.docs_documents.batchUpdate),
+    "docs_batch_update": (
+        {"document_id": FILE_ID, "requests": '[{"insertText": {"text": "x", "endOfSegmentLocation": {}}}]'},
+        lambda s: s.docs_documents.batchUpdate,
+    ),
     "docs_replace_text": (
         {"document_id": FILE_ID, "find": "a", "replace": "b"},
         lambda s: s.docs_documents.batchUpdate,
@@ -610,6 +614,70 @@ class GmailTest(unittest.TestCase):
         gmail = [t for n, t in load_tools().items() if n.startswith("gmail_")]
         self.assertTrue(gmail)
         self.assertTrue(all(t.read_only for t in gmail))
+
+
+def _link(link):
+    return {
+        "updateTextStyle": {
+            "range": {"startIndex": 1, "endIndex": 5},
+            "textStyle": {"link": link},
+            "fields": "link",
+        }
+    }
+
+
+class DocsBatchUpdateTest(unittest.TestCase):
+    def _call(self, requests):
+        """requests を JSON 文字列にして呼ぶ。結果と batchUpdate のモックを返す。"""
+        s = FakeServices({FILE_ID: MY_FILE})
+        s.docs_documents.batchUpdate.return_value.execute.return_value = {"replies": [{}] * len(requests)}
+        text = requests if isinstance(requests, str) else json.dumps(requests)
+        return call(s, "docs_batch_update", {"document_id": FILE_ID, "requests": text}), s.docs_documents.batchUpdate
+
+    def _assert_rejected(self, requests, *messages):
+        result, batch = self._call(requests)
+        self.assertTrue(result["isError"], result)
+        for m in messages:
+            self.assertIn(m, result["content"][0]["text"])
+        batch.assert_not_called()
+
+    def test_見出しと箇条書きと表のリクエストをそのまま渡しrepliesを返す(self):
+        requests = [
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": 1, "endIndex": 6},
+                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                    "fields": "namedStyleType",
+                }
+            },
+            {"createParagraphBullets": {"range": {"startIndex": 6, "endIndex": 21}, "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"}},
+            {"insertTable": {"rows": 2, "columns": 2, "endOfSegmentLocation": {}}},
+            {"deleteContentRange": {"range": {"startIndex": 30, "endIndex": 40}}},
+            _link({"url": "https://example.com/a?b=c"}),
+            _link({"heading": {"id": "h.1", "tabId": "t.0"}}),
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(batch.call_args.kwargs, {"documentId": FILE_ID, "body": {"requests": requests}})
+        self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
+
+    def test_許可リスト外のリクエストは拒否する(self):
+        for kind in ("insertInlineImage", "replaceImage", "insertComment", "addCommentReply", "insertPerson",
+                     "acceptSuggestion", "deleteTab", "insertRichLink", "insert_inline_image"):
+            with self.subTest(kind=kind):
+                self._assert_rejected([{kind: {}}], f"{kind} は使えません")
+
+    def test_入れ子のuriは種類にかかわらず拒否する(self):
+        uri = {"insertText": {"text": "x", "location": {"index": 1}, "extra": [{"uri": "https://evil.example/?q=秘密"}]}}
+        self._assert_rejected([uri], "requests[0].insertText.extra[0].uri")
+
+    def test_httpとhttps以外のリンクは拒否する(self):
+        for url in ("javascript:alert(1)", "ftp://example.com", "", 1, "//example.com"):
+            with self.subTest(url=url):
+                self._assert_rejected([_link({"url": url})], "textStyle.link.url")
+
+    def test_1件でも不正なら全体を拒否する(self):
+        self._assert_rejected([{"insertText": {"text": "x", "endOfSegmentLocation": {}}}, {"insertInlineImage": {}}])
 
 
 class DocsSlidesReadTest(unittest.TestCase):

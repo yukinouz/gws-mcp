@@ -1,15 +1,68 @@
 """ドキュメント ツール。
 
-- 読み取り: 本文をテキストで取得できる
-- 書き込み: 新規作成と、自分が所有するマイドライブのファイルへの追記・一括置換ができる
-- できないこと: 削除、共有ドライブや他人のファイルへの書き込み
+- 読み取り: 本文をテキストで取得できる。位置と段落の種類付きでも取得できる
+- 書き込み: 新規作成と、自分が所有するマイドライブのファイルへの追記・一括置換、
+  docs_batch_update による見出し・箇条書き・表・書式・文書内の削除ができる
+- できないこと: ファイルの削除、共有ドライブや他人のファイルへの書き込み
+
+docs_batch_update は許可リストの種類だけを受け付ける。プロンプトインジェクションで悪用されても
+ドキュメントの外に影響が出ないよう、Google が外部 URL を取りに行く操作と、第三者に通知が届く操作は含めない。
 """
 
-from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool
-from gws_mcp.tools._common import created, file_id, obj, writable
+import re
+
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
+from gws_mcp.tools._common import BATCH_REJECTED, created, file_id, obj, parse_batch_requests, writable
 
 _DOCUMENT_ID = file_id("ドキュメントの ID")
 _TEXT = {"type": "string", "minLength": 1, "maxLength": 200_000}
+
+# docs_batch_update で使えるリクエスト。ドキュメントの中で完結する編集だけを含める。
+# 外部 URL の画像を取りに行くもの（insertInlineImage・replaceImage）、第三者に通知が届くものや
+# 他人の提案を確定させるもの（コメント・insertPerson・提案の承認）、タブごとの削除は含めない
+_BATCH_ALLOWED = frozenset(
+    {
+        # 文字と段落
+        "insertText",
+        "replaceAllText",
+        "deleteContentRange",
+        "updateTextStyle",
+        "updateParagraphStyle",
+        "createParagraphBullets",
+        "deleteParagraphBullets",
+        "insertPageBreak",
+        "insertSectionBreak",
+        "insertDate",
+        # 表
+        "insertTable",
+        "insertTableRow",
+        "insertTableColumn",
+        "deleteTableRow",
+        "deleteTableColumn",
+        "updateTableCellStyle",
+        "updateTableRowStyle",
+        "updateTableColumnProperties",
+        "mergeTableCells",
+        "unmergeTableCells",
+        "pinTableHeaderRows",
+        # 文書の構成と見た目
+        "updateDocumentStyle",
+        "updateNamedStyle",
+        "updateSectionStyle",
+        "createHeader",
+        "createFooter",
+        "createFootnote",
+        "addDocumentTab",
+        "updateDocumentTabProperties",
+        "createNamedRange",
+        "deleteNamedRange",
+        "replaceNamedRangeContent",
+    }
+)
+_MAX_BATCH_REQUESTS = 200
+_MAX_BATCH_TEXT = 200_000
+# リンク（Link.url）に許すスキーム。表示されるだけでクリックしない限り何も送られないため、Web のリンクは許可する
+_LINK_URL_RE = re.compile(r"https?://", re.IGNORECASE)
 
 
 def _elements_text(elements: list) -> str:
@@ -92,6 +145,41 @@ def docs_read(services, args):
     return f"# {doc.get('title')}\n\n{text}"
 
 
+def _url_problems(value, path: str) -> list:
+    """入れ子の中のすべての uri・url を探し、問題の説明を返す。
+
+    uri は Google が取りに行く URL（画像など）なので、どこにあっても拒否する。本文を URL に埋め込んで外部に送れるため。
+    種類の許可リストをすり抜ける指定も拾えるよう、リクエストの種類ではなくキーの名前で探す。
+    入れ子が深くても再帰の上限に当たらないよう、スタックでたどる。
+    """
+    problems, stack = [], [(value, path)]
+    while stack:
+        v, p = stack.pop()
+        if isinstance(v, dict):
+            for k, child in v.items():
+                if k == "uri":
+                    problems.append(f"{p}.{k}: 外部 URL の取得（画像など）は使えません")
+                elif k == "url" and not (isinstance(child, str) and _LINK_URL_RE.match(child)):
+                    problems.append(f"{p}.{k}: リンクは http:// か https:// で始まる URL にしてください")
+                else:
+                    stack.append((child, f"{p}.{k}"))
+        elif isinstance(v, list):
+            stack.extend((child, f"{p}[{i}]") for i, child in enumerate(v))
+    return problems
+
+
+def _validate_batch_requests(text: str) -> list:
+    """docs_batch_update のリクエストを検査し、1つでも問題があれば API を呼ばずに全体を拒否する。"""
+    requests = parse_batch_requests(text, _BATCH_ALLOWED, _MAX_BATCH_REQUESTS)
+    problems = []
+    for i, req in enumerate(requests):
+        kind, body = next(iter(req.items()))
+        problems += _url_problems(body, f"requests[{i}].{kind}")
+    if problems:
+        raise ToolError(BATCH_REJECTED + "問題: " + "、".join(problems))
+    return requests
+
+
 def _insert_at_end(services, document_id: str, text: str):
     return (
         services.get("docs")
@@ -141,6 +229,20 @@ def docs_replace_text(services, args):
     )
     changed = (res.get("replies") or [{}])[0].get("replaceAllText", {}).get("occurrencesChanged", 0)
     return {"id": meta["id"], "name": meta.get("name"), "occurrencesChanged": changed}
+
+
+def docs_batch_update(services, args):
+    # 入力の検査は通信が要らないので、ガードより先に行う
+    requests = _validate_batch_requests(args["requests"])
+    meta = writable(services, args["document_id"])
+    res = (
+        services.get("docs")
+        .documents()
+        .batchUpdate(documentId=meta["id"], body={"requests": requests})
+        .execute()
+    )
+    # createHeader や addDocumentTab などで作られた ID を後で使えるよう、replies を返す
+    return {"replies": res.get("replies", [])}
 
 
 TOOLS = [
@@ -202,5 +304,39 @@ TOOLS = [
         read_only=False,
         guard=GUARD_MYDRIVE,
         idempotent=True,
+    ),
+    Tool(
+        name="docs_batch_update",
+        title="見出し・リスト・表などの編集",
+        description="Docs API の documents.batchUpdate で、見出し・箇条書き・表・文字の書式・挿入・削除などの編集を行う。"
+        "対象は自分が所有するマイドライブのファイルに限る。"
+        "requests にはリクエストの配列を JSON 文字列で渡す（" + str(_MAX_BATCH_REQUESTS) + " 件まで）。"
+        "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"
+        "範囲や位置は docs_read の format: structure で得た index で指定する（複数タブなら tabId も指定する）。"
+        "リクエストは配列の順に適用され、挿入や削除で後ろの index がずれるため、後ろの位置から順に並べる。"
+        "見出しは updateParagraphStyle の paragraphStyle.namedStyleType（HEADING_1〜6 など）と fields: namedStyleType、"
+        "箇条書きは createParagraphBullets で作る。"
+        "リンク（updateTextStyle の textStyle.link）は http:// か https:// の url、または文書内の heading・bookmark・tabId に限る。"
+        "画像の挿入・差し替え、コメント、人物のメンション、提案の承認、タブの削除はできない。"
+        "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
+        input_schema=obj(
+            {
+                "document_id": _DOCUMENT_ID,
+                "requests": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": _MAX_BATCH_TEXT,
+                    "description": "リクエストの配列の JSON 文字列"
+                    '（例: [{"updateParagraphStyle": {"range": {"startIndex": 1, "endIndex": 6}, '
+                    '"paragraphStyle": {"namedStyleType": "HEADING_2"}, "fields": "namedStyleType"}}, '
+                    '{"createParagraphBullets": {"range": {"startIndex": 6, "endIndex": 21}, '
+                    '"bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"}}]）',
+                },
+            },
+            ["document_id", "requests"],
+        ),
+        handler=docs_batch_update,
+        read_only=False,
+        guard=GUARD_MYDRIVE,
     ),
 ]
