@@ -188,6 +188,12 @@ class CreateTest(unittest.TestCase):
 
 
 class SheetsTest(unittest.TestCase):
+    def test_シート構成ではグラフのIDとタイトルも取得する(self):
+        s = FakeServices()
+        call(s, "sheets_get_metadata", {"spreadsheet_id": FILE_ID})
+        fields = s.apis["sheets"].spreadsheets.return_value.get.call_args.kwargs["fields"]
+        self.assertIn("charts(chartId,spec(title))", fields)
+
     def test_既定はRAWで書き込む(self):
         s = FakeServices({FILE_ID: MY_FILE})
         call(s, "sheets_write_range", {"spreadsheet_id": FILE_ID, "range": "A1", "values": [["=IMPORTDATA(\"x\")"]]})
@@ -337,9 +343,29 @@ class SheetsBatchUpdateTest(unittest.TestCase):
     def test_許可リスト外のリクエストは拒否する(self):
         for kind in ("deleteSheet", "deleteRange", "deleteDimension", "updateCells", "appendCells", "pasteData",
                      "copyPaste", "cutPaste", "addProtectedRange", "updateProtectedRange",
-                     "addDataSource", "refreshDataSource", "addChart", "addNamedRange", "updateSpreadsheetProperties"):
+                     "addDataSource", "refreshDataSource", "addNamedRange", "updateSpreadsheetProperties",
+                     "insertComment"):
             with self.subTest(kind=kind):
                 self._assert_rejected([{kind: {}}], f"{kind} は使えません")
+
+    def test_グラフの作成と編集は通す(self):
+        source = {"sourceRange": {"sources": [{"sheetId": 0, "endRowIndex": 5, "endColumnIndex": 1}]}}
+        chart = {"spec": {"title": "売上", "basicChart": {"chartType": "COLUMN", "domains": [{"domain": source}]}}}
+        requests = [
+            {"addChart": {"chart": chart}},
+            {"updateChartSpec": {"chartId": 1, "spec": chart["spec"]}},
+            {"updateEmbeddedObjectPosition": {"objectId": 1, "newPosition": {"newSheet": True}, "fields": "newSheet"}},
+            {"deleteEmbeddedObject": {"objectId": 2}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_データソースは書き方にかかわらず拒否する(self):
+        for key in ("dataSourceId", "data_source_id"):
+            with self.subTest(key=key):
+                chart = {"spec": {"dataSourceChartProperties": {key: "ds1"}}}
+                self._assert_rejected([{"addChart": {"chart": chart}}], f"dataSourceChartProperties.{key}")
 
     def test_repeatCellで値を書き込まない(self):
         cell = {"userEnteredValue": {"formulaValue": "=1+1"}, "userEnteredFormat": {}}

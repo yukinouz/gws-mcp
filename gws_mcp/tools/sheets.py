@@ -9,15 +9,23 @@
 数式は USER_ENTERED を指定すれば使える。ただし外部 URL にアクセスする関数
 （IMPORTDATA など）は、シートの内容を外部に送信できてしまうため、指定にかかわらず拒否する。
 
-書式・並べ替え・検索と置換は sheets_batch_update で行える。許可リストの種類だけを受け付け、
-削除や外部への接続はできない。repeatCell は範囲全体の値を一度に上書きできるため値を受け付けず、
+書式・並べ替え・検索と置換・グラフは sheets_batch_update で行える。許可リストの種類だけを受け付け、
+シートの削除や外部への接続はできない。repeatCell は範囲全体の値を一度に上書きできるため値を受け付けず、
 値の書き込みは RAW と USER_ENTERED を選べる sheets_write_range に寄せる。
 """
 
 import re
 
 from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
-from gws_mcp.tools._common import BATCH_REJECTED, created, file_id, obj, parse_batch_requests, writable
+from gws_mcp.tools._common import (
+    BATCH_REJECTED,
+    created,
+    external_ref_problems,
+    file_id,
+    obj,
+    parse_batch_requests,
+    writable,
+)
 
 # Google が引数の URL にアクセスする関数。URL にセルの値を埋め込まれると外部に送られる。
 # IMPORTRANGE（Google スプレッドシート間の参照）や HYPERLINK（表示のみ）は外部に出ないので対象外。
@@ -45,7 +53,7 @@ _FORMULA_NOTE = (
 )
 _SHEET_TITLE = {"type": "string", "minLength": 1, "maxLength": 100}
 
-# sheets_batch_update で使えるリクエスト。削除・外部接続・権限の変更は含めない
+# sheets_batch_update で使えるリクエスト。シートの削除・外部接続・権限の変更は含めない
 _BATCH_ALLOWED = frozenset(
     {
         "repeatCell",
@@ -62,8 +70,17 @@ _BATCH_ALLOWED = frozenset(
         "unmergeCells",
         "sortRange",
         "findReplace",
+        # グラフ。データ範囲は同じスプレッドシートの中だけを指す
+        "addChart",
+        "updateChartSpec",
+        "updateEmbeddedObjectPosition",
+        "updateEmbeddedObjectBorder",
+        "deleteEmbeddedObject",
     }
 )
+# 許可した種類の中にも入れられる、外部データにつながるキー。
+# グラフやフィルタは dataSourceId で BigQuery などのデータソースを参照できる
+_BLOCKED_KEYS = {"dataSourceId": "データソース（BigQuery などの外部データ）は使えません"}
 _MAX_BATCH_REQUESTS = 200
 _MAX_BATCH_TEXT = 200_000
 # fields（上書きする項目）を絞る種類と、許可する項目。それ以外の項目は表示や構造を大きく変えるため
@@ -195,6 +212,7 @@ def _validate_batch_requests(text: str) -> list:
     for i, req in enumerate(requests):
         kind, body = next(iter(req.items()))
         problems += _check_batch_request(kind, body, f"requests[{i}].{kind}")
+        problems += external_ref_problems(body, f"requests[{i}].{kind}", _BLOCKED_KEYS)
         hits += _external_fetch_hits(body, f"requests[{i}].{kind}")
     if hits:
         problems.append(
@@ -212,7 +230,8 @@ def sheets_get_metadata(services, args):
         .get(
             spreadsheetId=args["spreadsheet_id"],
             fields="spreadsheetId,spreadsheetUrl,properties(title,locale,timeZone),"
-            "sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)))",
+            # グラフの ID は、グラフの更新やスライドへの埋め込みで指定する
+            "sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)),charts(chartId,spec(title)))",
         )
         .execute()
     )
@@ -311,7 +330,7 @@ TOOLS = [
     Tool(
         name="sheets_get_metadata",
         title="シート構成を取得",
-        description="スプレッドシートのタイトルと、各シート（タブ）の名前・行数・列数を取得する。",
+        description="スプレッドシートのタイトルと、各シート（タブ）の名前・行数・列数、グラフの ID とタイトルを取得する。",
         input_schema=obj({"spreadsheet_id": _SPREADSHEET_ID}, ["spreadsheet_id"]),
         handler=sheets_get_metadata,
         read_only=True,
@@ -397,7 +416,7 @@ TOOLS = [
     Tool(
         name="sheets_batch_update",
         title="書式・並べ替え・置換",
-        description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換を行う。"
+        description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換・グラフの作成と編集を行う。"
         "対象は自分が所有するマイドライブのファイルに限る。"
         "requests にはリクエストの配列を JSON 文字列で渡す（" + str(_MAX_BATCH_REQUESTS) + " 件まで）。"
         "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"
@@ -407,7 +426,9 @@ TOOLS = [
         "updateSheetProperties の fields は gridProperties.frozenRowCount・gridProperties.frozenColumnCount・tabColorStyle だけ、"
         "updateDimensionProperties の fields は pixelSize だけを指定できる。"
         "repeatCell での値（userEnteredValue）の書き込みは拒否される（値は sheets_write_range で書き込む）。"
-        "外部 URL にアクセスする " + "・".join(_EXTERNAL_FETCH_FUNCTIONS) + " を含むリクエストは拒否される。"
+        "グラフ（addChart など）のデータ範囲は同じスプレッドシートの GridRange で指定する。"
+        "グラフの ID（chartId・objectId）は sheets_get_metadata で取得する。"
+        "外部 URL にアクセスする " + "・".join(_EXTERNAL_FETCH_FUNCTIONS) + " を含むリクエストと、データソース（dataSourceId）は拒否される。"
         "mergeCells は左上以外のセルの値を消すため、値のない範囲か、消えてよいことを確かめてから使う。"
         "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
         input_schema=obj(
