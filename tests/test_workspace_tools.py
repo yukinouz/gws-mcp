@@ -86,6 +86,10 @@ WRITE_TOOLS = {
         lambda s: s.apis["sheets"].spreadsheets.return_value.batchUpdate,
     ),
     "docs_append_text": ({"document_id": FILE_ID, "text": "x"}, lambda s: s.docs_documents.batchUpdate),
+    "docs_batch_update": (
+        {"document_id": FILE_ID, "requests": '[{"insertText": {"text": "x", "endOfSegmentLocation": {}}}]'},
+        lambda s: s.docs_documents.batchUpdate,
+    ),
     "docs_replace_text": (
         {"document_id": FILE_ID, "find": "a", "replace": "b"},
         lambda s: s.docs_documents.batchUpdate,
@@ -612,6 +616,83 @@ class GmailTest(unittest.TestCase):
         self.assertTrue(all(t.read_only for t in gmail))
 
 
+def _link(link):
+    return {
+        "updateTextStyle": {
+            "range": {"startIndex": 1, "endIndex": 5},
+            "textStyle": {"link": link},
+            "fields": "link",
+        }
+    }
+
+
+class DocsBatchUpdateTest(unittest.TestCase):
+    def _call(self, requests):
+        """requests を JSON 文字列にして呼ぶ。結果と batchUpdate のモックを返す。"""
+        s = FakeServices({FILE_ID: MY_FILE})
+        s.docs_documents.batchUpdate.return_value.execute.return_value = {"replies": [{}] * len(requests)}
+        text = requests if isinstance(requests, str) else json.dumps(requests)
+        return call(s, "docs_batch_update", {"document_id": FILE_ID, "requests": text}), s.docs_documents.batchUpdate
+
+    def _assert_rejected(self, requests, *messages):
+        result, batch = self._call(requests)
+        self.assertTrue(result["isError"], result)
+        for m in messages:
+            self.assertIn(m, result["content"][0]["text"])
+        batch.assert_not_called()
+
+    def test_見出しと箇条書きと表のリクエストをそのまま渡しrepliesを返す(self):
+        requests = [
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": 1, "endIndex": 6},
+                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                    "fields": "namedStyleType",
+                }
+            },
+            {"createParagraphBullets": {"range": {"startIndex": 6, "endIndex": 21}, "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"}},
+            {"insertTable": {"rows": 2, "columns": 2, "endOfSegmentLocation": {}}},
+            {"deleteContentRange": {"range": {"startIndex": 30, "endIndex": 40}}},
+            _link({"url": "https://example.com/a?b=c"}),
+            _link({"heading": {"id": "h.1", "tabId": "t.0"}}),
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(batch.call_args.kwargs, {"documentId": FILE_ID, "body": {"requests": requests}})
+        self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
+
+    def test_許可リスト外のリクエストは拒否する(self):
+        for kind in ("insertInlineImage", "replaceImage", "insertComment", "addCommentReply", "insertPerson",
+                     "acceptSuggestion", "deleteTab", "insertRichLink", "insert_inline_image"):
+            with self.subTest(kind=kind):
+                self._assert_rejected([{kind: {}}], f"{kind} は使えません")
+
+    def test_入れ子のuriは種類にかかわらず拒否する(self):
+        uri = {"insertText": {"text": "x", "location": {"index": 1}, "extra": [{"uri": "https://evil.example/?q=秘密"}]}}
+        self._assert_rejected([uri], "requests[0].insertText.extra[0].uri")
+
+    def test_httpとhttps以外のリンクは拒否する(self):
+        for url in ("javascript:alert(1)", "ftp://example.com", "", 1, "//example.com", " https://example.com"):
+            with self.subTest(url=url):
+                self._assert_rejected([_link({"url": url})], "textStyle.link.url")
+
+    def test_大文字のスキームと文書内リンクは通す(self):
+        for link in ({"url": "HTTPS://Example.com"}, {"bookmark": {"id": "kix.1"}}, {"tabId": "t.1"}):
+            with self.subTest(link=link):
+                result, batch = self._call([_link(link)])
+                self.assertFalse(result["isError"], result)
+                batch.assert_called_once()
+
+    def test_スタイル定義やsnake_caseの入れ子でもリンクを検査する(self):
+        named = {"updateNamedStyle": {"namedStyle": {"namedStyleType": "HEADING_2", "textStyle": {"link": {"url": "javascript:x"}}}, "fields": "textStyle.link"}}
+        self._assert_rejected([named], "updateNamedStyle.namedStyle.textStyle.link.url")
+        snake = {"updateTextStyle": {"range": {"start_index": 1, "end_index": 2}, "text_style": {"link": {"url": "javascript:x"}}, "fields": "link"}}
+        self._assert_rejected([snake], "text_style.link.url")
+
+    def test_1件でも不正なら全体を拒否する(self):
+        self._assert_rejected([{"insertText": {"text": "x", "endOfSegmentLocation": {}}}, {"insertInlineImage": {}}])
+
+
 class DocsSlidesReadTest(unittest.TestCase):
     def test_ドキュメントの段落と表を読む(self):
         s = FakeServices()
@@ -644,6 +725,117 @@ class DocsSlidesReadTest(unittest.TestCase):
         text = call(s, "docs_read", {"document_id": FILE_ID})["content"][0]["text"]
         self.assertIn("はじめに", text)
         self.assertIn("A | B", text)
+
+    def test_構造表示では位置と段落の種類を返す(self):
+        s = FakeServices()
+        s.docs_documents.get.return_value.execute.return_value = {
+            "title": "議事録",
+            "tabs": [
+                {
+                    "documentTab": {
+                        "body": {
+                            "content": [
+                                {
+                                    "startIndex": 1,
+                                    "endIndex": 6,
+                                    "paragraph": {
+                                        "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                                        "elements": [{"textRun": {"content": "決定事項\n"}}],
+                                    },
+                                },
+                                {
+                                    "startIndex": 6,
+                                    "endIndex": 15,
+                                    "paragraph": {
+                                        "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                                        "bullet": {"listId": "l1", "nestingLevel": 1},
+                                        "elements": [{"textRun": {"content": "予算は来期に回す\n"}}],
+                                    },
+                                },
+                                {
+                                    "startIndex": 15,
+                                    "endIndex": 22,
+                                    "table": {
+                                        "rows": 1,
+                                        "columns": 1,
+                                        "tableRows": [
+                                            {
+                                                "tableCells": [
+                                                    {
+                                                        "startIndex": 17,
+                                                        "endIndex": 20,
+                                                        "content": [
+                                                            {
+                                                                "startIndex": 18,
+                                                                "endIndex": 20,
+                                                                "paragraph": {"elements": [{"textRun": {"content": "A\n"}}]},
+                                                            }
+                                                        ],
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    },
+                                },
+                            ]
+                        }
+                    }
+                }
+            ],
+        }
+        text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("[1-6) HEADING_2 決定事項\n", text)
+        self.assertIn("[6-15) NORMAL_TEXT 箇条書き(階層1) 予算は来期に回す", text)
+        self.assertIn("[15-22) 表 1行×1列", text)
+        self.assertIn("  セル(0,0) [17-20)\n    [18-20) NORMAL_TEXT A", text)
+
+    def test_構造表示では文字以外の要素と要素ごとの位置を返す(self):
+        s = FakeServices()
+        content = [
+            # API は 0 の startIndex を省略して返す
+            {"endIndex": 1, "sectionBreak": {}},
+            {"startIndex": 1, "endIndex": 3, "tableOfContents": {"content": []}},
+            {
+                "startIndex": 3,
+                "endIndex": 9,
+                "paragraph": {
+                    "elements": [
+                        {"startIndex": 3, "endIndex": 5, "textRun": {"content": "図:"}},
+                        {"startIndex": 5, "endIndex": 6, "inlineObjectElement": {"inlineObjectId": "i1"}},
+                        {"startIndex": 6, "endIndex": 9, "textRun": {"content": "太字\n", "textStyle": {"bold": True}}},
+                    ]
+                },
+            },
+            {"startIndex": 9, "endIndex": 10, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+            {
+                "startIndex": 10,
+                "endIndex": 14,
+                "paragraph": {
+                    "elements": [
+                        {"startIndex": 10, "endIndex": 13, "textRun": {"content": "リンク", "textStyle": {"link": {}}}},
+                        {"startIndex": 13, "endIndex": 14, "textRun": {"content": "\n"}},
+                    ]
+                },
+            },
+        ]
+        s.docs_documents.get.return_value.execute.return_value = {"title": "d", "tabs": [{"documentTab": {"body": {"content": content}}}]}
+        text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("[1-3) 目次", text)
+        self.assertIn("[3-9) NORMAL_TEXT 図:[画像]太字\n  [3-5) 図:\n  [5-6) [画像]\n  [6-9) 太字\n", text)
+        self.assertIn("[9-10) NORMAL_TEXT （空行）", text)
+        self.assertIn("[10-14) NORMAL_TEXT リンク\n  [10-13) リンク\n  [13-14) （改行）\n", text)
+
+    def test_構造表示では複数タブのタブIDを返す(self):
+        s = FakeServices()
+
+        def tab(tab_id, title):
+            return {"tabProperties": {"tabId": tab_id, "title": title}, "documentTab": {"body": {"content": []}}}
+
+        s.docs_documents.get.return_value.execute.return_value = {"title": "d", "tabs": [tab("t.0", "表紙"), tab("t.1", "本文")]}
+        text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("## タブ: 本文（tabId: t.1）", text)
+        plain = call(s, "docs_read", {"document_id": FILE_ID})["content"][0]["text"]
+        self.assertNotIn("tabId", plain)
 
     def test_スライドのテキストを読む(self):
         s = FakeServices()
