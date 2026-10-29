@@ -341,9 +341,9 @@ class SheetsBatchUpdateTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
 
     def test_許可リスト外のリクエストは拒否する(self):
-        for kind in ("deleteSheet", "deleteTable", "updateCells", "appendCells", "pasteData",
-                     "addProtectedRange", "updateProtectedRange", "addDataSource", "refreshDataSource",
-                     "updateSpreadsheetProperties", "insertComment"):
+        for kind in ("deleteSheet", "deleteTable", "updateTable", "updateNamedRange", "deleteNamedRange",
+                     "updateCells", "appendCells", "pasteData", "addProtectedRange", "updateProtectedRange",
+                     "addDataSource", "refreshDataSource", "updateSpreadsheetProperties", "insertComment"):
             with self.subTest(kind=kind):
                 self._assert_rejected([{kind: {}}], f"{kind} は使えません")
 
@@ -390,6 +390,28 @@ class SheetsBatchUpdateTest(unittest.TestCase):
         result, batch = self._call(requests)
         self.assertFalse(result["isError"], result)
         batch.assert_called_once()
+
+    def test_追加した種類の入れ子にも外部アクセス関数とデータソースの検査がかかる(self):
+        condition = {"type": "TEXT_EQ", "values": [{"userEnteredValue": '=IMPORTXML("https://evil.example", "//a")'}]}
+        view = {"addFilterView": {"filter": {"filterSpecs": [{"columnIndex": 0, "filterCriteria": {"condition": condition}}]}}}
+        self._assert_rejected([view], "IMPORTXML")
+        rule = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": '=IMAGE("https://evil.example")'}]}}
+        table = {"addTable": {"table": {"range": {"sheetId": 0}, "columnProperties": [{"columnIndex": 0, "dataValidationRule": rule}]}}}
+        self._assert_rejected([table], "IMAGE")
+        for key in ("dataSourceColumnReference", "data_source_column_reference"):
+            with self.subTest(key=key):
+                slicer = {"addSlicer": {"slicer": {"spec": {"filterCriteria": {}, key: {"name": "列"}}}}}
+                self._assert_rejected([slicer], f"spec.{key}")
+
+    def test_テーブルの列に人物やファイルなどのチップは使えない(self):
+        for key in ("columnType", "column_type"):
+            for chip in ("PEOPLE_CHIP", "FILES_CHIP", "FINANCE_CHIP", "PLACE_CHIP"):
+                with self.subTest(key=key, chip=chip):
+                    table = {"addTable": {"table": {"range": {"sheetId": 0}, "columnProperties": [{"columnIndex": 0, key: chip}]}}}
+                    self._assert_rejected([table], f"{key}: {chip}")
+        ok = {"addTable": {"table": {"range": {"sheetId": 0}, "columnProperties": [{"columnIndex": 0, "columnType": "RATINGS_CHIP"}]}}}
+        result, batch = self._call([ok])
+        self.assertFalse(result["isError"], result)
 
     def test_データソースは書き方にかかわらず拒否する(self):
         for key in ("dataSourceId", "data_source_id"):
