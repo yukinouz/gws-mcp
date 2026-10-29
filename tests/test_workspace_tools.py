@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from gws_mcp.schema import SchemaError, validate
 from gws_mcp.server import MCPServer
-from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, GUARD_OWN_EVENT, load_tools
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, GUARD_OWN_EVENT, load_tools, slides
 
 FILE_ID = "1AbCdEfGhIjKlMnOp"
 NEW_ID = "1NeWfIlEiDxYz9876"
@@ -732,6 +732,9 @@ class SlidesBatchUpdateTest(unittest.TestCase):
             {"insertText": {"objectId": "box_1", "text": "売上"}},
             {"updatePageProperties": {"objectId": "slide_new1", "pageProperties": {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": {"blue": 1}}}}}, "fields": "pageBackgroundFill.solidFill.color"}},
             {"deleteObject": {"objectId": "p2"}},
+            {"updateShapeProperties": {"objectId": "box_1", "shapeProperties": {"link": {"slideIndex": 2}}, "fields": "link"}},
+            {"updateImageProperties": {"objectId": "img_1", "imageProperties": {"brightness": 0.2}, "fields": "brightness"}},
+            {"updateVideoProperties": {"objectId": "vid_1", "videoProperties": {"mute": True}, "fields": "mute"}},
             _slide_link({"url": "https://example.com/a?b=c"}),
             _slide_link({"pageObjectId": "p1"}),
             _slide_link({"relativeLink": "NEXT_SLIDE"}),
@@ -769,6 +772,22 @@ class SlidesBatchUpdateTest(unittest.TestCase):
         for url in ("javascript:alert(1)", "ftp://example.com", "", 1, "//example.com"):
             with self.subTest(url=url):
                 self._assert_rejected([_slide_link({"url": url})], "style.link.url")
+
+    def test_図形と画像と線のリンクも検査する(self):
+        for kind, props in (
+            ("updateShapeProperties", "shapeProperties"),
+            ("updateImageProperties", "imageProperties"),
+            ("updateLineProperties", "lineProperties"),
+        ):
+            with self.subTest(kind=kind):
+                request = {kind: {"objectId": "s_12345", props: {"link": {"url": "javascript:alert(1)"}}, "fields": "link"}}
+                self._assert_rejected([request], f"{kind}.{props}.link.url")
+
+    def test_外部URLや別ファイルを取り込む種類は許可リストに入れない(self):
+        blocked = {"createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
+                   "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
+                   "updateCommentPost", "deleteComment", "deleteCommentReply"}
+        self.assertFalse(blocked & slides._BATCH_ALLOWED)
 
     def test_1件でも不正なら全体を拒否する(self):
         self._assert_rejected([{"insertText": {"objectId": "t_12345", "text": "x"}}, {"createImage": {"url": "https://example.com/a.png"}}])

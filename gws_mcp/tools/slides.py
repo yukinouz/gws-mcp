@@ -77,8 +77,9 @@ _BATCH_ALLOWED = frozenset(
 )
 _MAX_BATCH_REQUESTS = 200
 _MAX_BATCH_TEXT = 200_000
-# 許可した種類の中にも入れられる、外部 URL や別ファイルの ID のキー。
-# 背景画像（updatePageProperties の stretchedPictureFill.contentUrl）は、Google が挿入時に URL を取りに行く
+# 外部 URL や別ファイルの ID のキー。許可した種類の中では背景画像（updatePageProperties の
+# stretchedPictureFill.contentUrl）に入れられ、Google が挿入時に URL を取りに行く。
+# imageUrl と spreadsheetId は止めた種類にだけあるキーで、API がほかの種類に広げても拾えるよう入れておく
 _BLOCKED_KEYS = {
     "contentUrl": "画像の URL は使えません（Google が外部 URL を取りに行くため）",
     "imageUrl": "画像の URL は使えません（Google が外部 URL を取りに行くため）",
@@ -448,8 +449,8 @@ TOOLS = [
         "createSlide・createShape などで objectId（英数字とアンダースコアで 5〜50 文字）を指定すると、"
         "同じ requests の後ろのリクエストでその ID を使える。リクエストは配列の順に適用される。"
         "位置と大きさは unit に PT を指定すると pt で書ける。"
-        "リンク（updateTextStyle の style.link）は http:// か https:// の url、またはスライド内（pageObjectId・slideIndex・"
-        "relativeLink）に限る。画像・動画・スプレッドシートのグラフの挿入や差し替え、背景画像、コメントはできない。"
+        "リンク（updateTextStyle の style.link、図形・画像・線の properties の link）は http:// か https:// の url、"
+        "またはスライド内（pageObjectId・slideIndex・relativeLink）に限る。画像・動画・スプレッドシートのグラフの挿入や差し替え、背景画像、コメントはできない。"
         "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
         input_schema=obj(
             {
