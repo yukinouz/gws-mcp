@@ -1220,6 +1220,27 @@ class DocsSlidesReadTest(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertNotIn("## レイアウト", text)
 
+    def test_構造表示では段落内の改行を目印で示す(self):
+        shape = {"text": {"textElements": [
+            {"endIndex": 6, "paragraphMarker": {}},
+            {"endIndex": 6, "textRun": {"content": "売上\u000b利益\n"}},
+        ]}}
+        s = FakeServices()
+        s.slides_presentations.get.return_value.execute.return_value = {
+            "slides": [{"objectId": "p1", "pageElements": [{"objectId": "t1", "shape": shape}]}]
+        }
+        text = call(s, "slides_read", {"presentation_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("[0-6) 売上↵利益", text)
+        s.docs_documents.get.return_value.execute.return_value = {
+            "tabs": [{"documentTab": {"body": {"content": [
+                {"startIndex": 1, "endIndex": 7, "paragraph": {"elements": [
+                    {"startIndex": 1, "endIndex": 7, "textRun": {"content": "売上\u000b利益\n"}},
+                ]}},
+            ]}}}]
+        }
+        text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("[1-7) NORMAL_TEXT 売上↵利益", text)
+
 
 if __name__ == "__main__":
     unittest.main()

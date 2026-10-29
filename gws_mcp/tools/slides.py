@@ -22,6 +22,7 @@ from gws_mcp.tools._common import (
     key_name,
     obj,
     parse_batch_requests,
+    run_text,
     writable,
 )
 
@@ -178,7 +179,7 @@ def _span(el: dict) -> str:
 
 def _run_text(te: dict) -> str:
     if "textRun" in te:
-        return te["textRun"].get("content", "").rstrip("\n")
+        return run_text(te["textRun"].get("content", ""))
     return "[自動テキスト]" if "autoText" in te else ""
 
 

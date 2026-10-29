@@ -39,6 +39,15 @@ def created(services, file_id_: str) -> dict:
     return {"id": meta["id"], "name": meta.get("name"), "mimeType": meta.get("mimeType")}
 
 
+def run_text(content: str) -> str:
+    """構造表示の 1 行に出すため、文字の範囲（textRun）の内容から段落の終わりの改行を除き、段落内の改行を ↵ で示す。
+
+    段落内の改行（Shift+Enter）は垂直タブ（\\u000b）で返り、そのまま出すと 1 行の表示が崩れるため。
+    ↵ も UTF-16 で 1 単位なので、表示の文字数と位置は変わらない。
+    """
+    return content.rstrip("\n").replace("\u000b", "↵")
+
+
 def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> list:
     """batchUpdate のリクエスト配列（JSON 文字列）を読み込み、件数と種類を検査する。
 

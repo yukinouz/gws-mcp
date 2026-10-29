@@ -17,6 +17,7 @@ from gws_mcp.tools._common import (
     file_id,
     obj,
     parse_batch_requests,
+    run_text,
     writable,
 )
 
@@ -119,7 +120,7 @@ def _span(el: dict) -> str:
 
 def _element_text(pe: dict) -> str:
     if "textRun" in pe:
-        return pe["textRun"].get("content", "").rstrip("\n")
+        return run_text(pe["textRun"].get("content", ""))
     kind = next((k for k in pe if k not in ("startIndex", "endIndex")), "不明")
     return f"[{_ELEMENT_LABELS.get(kind, kind)}]"
 
