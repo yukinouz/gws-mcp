@@ -120,39 +120,44 @@ _ELEMENT_LABELS = {
 }
 
 
-def _pt(dimension: dict | None, unit: str | None = None) -> float:
-    """Dimension（magnitude と unit）か、unit を別に持つ数値を pt に直す。"""
-    if isinstance(dimension, dict):
-        magnitude, unit = dimension.get("magnitude", 0), dimension.get("unit")
-    else:
-        magnitude = dimension or 0
-    return magnitude if unit == "PT" else magnitude / _EMU_PER_PT
+def _pt(value: float | None, unit: str | None) -> float:
+    return (value or 0) if unit == "PT" else (value or 0) / _EMU_PER_PT
+
+
+def _dimension_pt(dimension: dict | None) -> float:
+    """Dimension（magnitude と unit）を pt に直す。"""
+    dimension = dimension or {}
+    return _pt(dimension.get("magnitude"), dimension.get("unit"))
 
 
 def _num(value: float) -> str:
-    return f"{value:.1f}".rstrip("0").rstrip(".")
+    # 0.0 を足して、-0.0 を 0 と出す
+    return f"{round(value, 1) + 0.0:.1f}".rstrip("0").rstrip(".")
 
 
 def _geometry(el: dict, in_group: bool) -> str:
-    """位置と見た目の大きさ（拡大・せん断を反映した外接矩形）を pt で返す。
+    """見た目の外接矩形の左上の位置と大きさを pt で返す。
 
-    LLM が新しい図形を置く場所や、既存の図形の大きさを決めるため。
-    グループ内の要素の位置はグループ基準で返るため、そう明記する。
+    LLM が新しい図形を置く場所や、既存の図形の大きさを決めるため。回転・反転した要素も、
+    位置と大きさが同じ矩形を指すよう、変換後の 4 隅から外接矩形を求める。
+    グループ内の要素の transform はグループ基準のため、そう明記する。
     """
     t = el.get("transform")
     # API は 0 の値を省略して返す。transform 自体がなければ移動も拡大もない
     if t is None:
         t = {"scaleX": 1, "scaleY": 1}
-    unit = t.get("unit")
-    x, y = _pt(t.get("translateX"), unit), _pt(t.get("translateY"), unit)
-    label = "グループ基準の位置" if in_group else "位置"
-    out = f" {label}({_num(x)},{_num(y)}pt)"
-    size = el.get("size")
+    sx, sy = t.get("scaleX", 0), t.get("scaleY", 0)
+    shx, shy = t.get("shearX", 0), t.get("shearY", 0)
+    size = el.get("size") or {}
+    w, h = _dimension_pt(size.get("width")), _dimension_pt(size.get("height"))
+    x = _pt(t.get("translateX"), t.get("unit")) + min(0, sx * w) + min(0, shx * h)
+    y = _pt(t.get("translateY"), t.get("unit")) + min(0, shy * w) + min(0, sy * h)
+    base = " グループ基準:" if in_group else ""
+    out = f"{base} 位置({_num(x)},{_num(y)}pt)"
     if size:
-        w, h = _pt(size.get("width")), _pt(size.get("height"))
-        width = abs(t.get("scaleX", 0) * w) + abs(t.get("shearX", 0) * h)
-        height = abs(t.get("scaleY", 0) * h) + abs(t.get("shearY", 0) * w)
-        out += f" 大きさ({_num(width)}×{_num(height)}pt)"
+        out += f" 大きさ({_num(abs(sx * w) + abs(shx * h))}×{_num(abs(sy * h) + abs(shy * w))}pt)"
+    if shx or shy or sx < 0 or sy < 0:
+        out += " 回転・反転あり"
     return out
 
 
@@ -253,13 +258,15 @@ def _slides_structure(pres: dict) -> list[str]:
             # 空のノートにも書き込めるよう、ID は中身がなくても出す
             parts.append(f"（スピーカーノート objectId: {notes_id}）")
             parts.extend(_text_structure((shape or {}).get("text"), "  "))
-    parts.append("\n## レイアウト（createSlide の slideLayoutReference.layoutId に使う）")
+    if layouts:
+        parts.append("\n## レイアウト（createSlide の slideLayoutReference.layoutId に使う）")
     parts.extend(
         f"{lay_id} {props.get('name', '')}「{props.get('displayName', '')}」" for lay_id, props in layouts.items()
     )
     size = pres.get("pageSize") or {}
     if size:
-        parts.append(f"\nページの大きさ {_num(_pt(size.get('width')))}×{_num(_pt(size.get('height')))}pt")
+        width, height = _dimension_pt(size.get("width")), _dimension_pt(size.get("height"))
+        parts.append(f"\nページの大きさ {_num(width)}×{_num(height)}pt")
     return parts
 
 
@@ -365,7 +372,8 @@ TOOLS = [
         title="スライドを読む",
         description="プレゼンテーションの各スライドのテキスト（図形・表・スピーカーノート）を取得する。"
         "format に structure を指定すると、ページ要素（図形・表・画像・グループなど）ごとに objectId・種類・"
-        "位置と見た目の大きさ（pt）・プレースホルダーの種類と、テキストの段落ごとの位置 [startIndex-endIndex)"
+        "外接矩形の位置と大きさ（pt・グループ内の要素はグループ基準）・プレースホルダーの種類と、"
+        "テキストの段落ごとの位置 [startIndex-endIndex)"
         "（終わりを含まない）・箇条書きの階層を返す。スピーカーノートの objectId、レイアウトの一覧、ページの大きさも返す。"
         "slides_batch_update で対象を指定する前に使う。",
         input_schema=obj(

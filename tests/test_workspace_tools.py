@@ -1002,7 +1002,7 @@ class DocsSlidesReadTest(unittest.TestCase):
             "    [0-3) 項目",
             "画像 img1 位置(10,0pt)",
             "グループ g1 位置(0,0pt)",
-            "  線 c1 グループ基準の位置(0,5pt)",
+            "  線 c1 グループ基準: 位置(0,5pt)",
             "（スピーカーノート objectId: n1）",
             "l_2 TITLE_AND_BODY「タイトルと本文」",
             "ページの大きさ 720×405pt",
@@ -1013,6 +1013,71 @@ class DocsSlidesReadTest(unittest.TestCase):
         plain = call(s, "slides_read", {"presentation_id": FILE_ID})["content"][0]["text"]
         self.assertNotIn("objectId: t1", plain)
         self.assertIn("四半期の振り返", plain)
+
+    def test_スライドの構造表示では回転や入れ子のグループ_自動テキスト_ノートの中身も示す(self):
+        def pt(value):
+            return {"magnitude": value, "unit": "PT"}
+
+        s = FakeServices()
+        s.slides_presentations.get.return_value.execute.return_value = {
+            "title": "提案",
+            "slides": [
+                {
+                    "objectId": "p1",
+                    "slideProperties": {
+                        "notesPage": {
+                            "notesProperties": {"speakerNotesObjectId": "n1"},
+                            "pageElements": [
+                                {
+                                    "objectId": "n1",
+                                    "shape": {"text": {"textElements": [
+                                        {"endIndex": 5, "paragraphMarker": {}},
+                                        {"endIndex": 5, "textRun": {"content": "冒頭で話す\n"}},
+                                    ]}},
+                                }
+                            ],
+                        },
+                    },
+                    "pageElements": [
+                        # 90 度回転: 元の左上 (100,50) が右上に来るため、外接矩形の左上は x が高さの分だけ左
+                        {
+                            "objectId": "r1",
+                            "size": {"width": pt(200), "height": pt(40)},
+                            "transform": {"shearX": -1, "shearY": 1, "translateX": 100, "translateY": 50, "unit": "PT"},
+                            "shape": {"shapeType": "RECTANGLE"},
+                        },
+                        # transform がなければ等倍・原点
+                        {"objectId": "z1", "size": {"width": pt(30), "height": pt(20)}, "image": {}},
+                        {
+                            "objectId": "s1",
+                            "shape": {"shapeType": "TEXT_BOX", "text": {"textElements": [
+                                {"endIndex": 1, "paragraphMarker": {}},
+                                {"endIndex": 1, "textRun": {"content": "\n"}},
+                                {"startIndex": 1, "endIndex": 2, "paragraphMarker": {}},
+                                {"startIndex": 1, "endIndex": 2, "autoText": {"type": "SLIDE_NUMBER"}},
+                            ]}},
+                        },
+                        {
+                            "objectId": "g1",
+                            "elementGroup": {"children": [
+                                {"objectId": "g2", "elementGroup": {"children": [{"objectId": "v1", "video": {}}]}}
+                            ]},
+                        },
+                    ],
+                }
+            ],
+        }
+        text = call(s, "slides_read", {"presentation_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        for expected in (
+            "図形 r1 RECTANGLE 位置(60,50pt) 大きさ(40×200pt) 回転・反転あり",
+            "画像 z1 位置(0,0pt) 大きさ(30×20pt)",
+            "  [0-1) （空行）",
+            "  [1-2) [自動テキスト]",
+            "    動画 v1 グループ基準: 位置(0,0pt)",
+            "  [0-5) 冒頭で話す",
+        ):
+            self.assertIn(expected, text)
+        self.assertNotIn("## レイアウト", text)
 
 
 if __name__ == "__main__":
