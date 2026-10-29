@@ -39,6 +39,15 @@ def created(services, file_id_: str) -> dict:
     return {"id": meta["id"], "name": meta.get("name"), "mimeType": meta.get("mimeType")}
 
 
+def run_text(content: str) -> str:
+    """構造表示の 1 行に出すため、文字の範囲（textRun）の内容から段落の終わりの改行を除き、段落内の改行を ↵ で示す。
+
+    段落内の改行（Shift+Enter）は垂直タブ（\\u000b）で返り、そのまま出すと 1 行の表示が崩れるため。
+    ↵ も UTF-16 で 1 単位なので、表示の文字数と位置は変わらない。
+    """
+    return content.rstrip("\n").replace("\u000b", "↵")
+
+
 def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> list:
     """batchUpdate のリクエスト配列（JSON 文字列）を読み込み、件数と種類を検査する。
 
@@ -78,7 +87,7 @@ def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> li
     return requests
 
 
-def _key_name(key: str) -> str:
+def key_name(key: str) -> str:
     """キーの名前を、camelCase と snake_case の違いを無視して比べられる形にする。
 
     API は text_style のような snake_case のキーも受け付けるため、content_url などの書き方で検査をすり抜けさせない。
@@ -96,13 +105,13 @@ def external_ref_problems(value, path: str, blocked_keys: Mapping[str, str]) -> 
     種類の許可リストをすり抜ける指定も拾えるよう、リクエストの種類ではなくキーの名前で探す。
     入れ子が深くても再帰の上限に当たらないよう、スタックでたどる。
     """
-    blocked = {_key_name(k): message for k, message in blocked_keys.items()}
+    blocked = {key_name(k): message for k, message in blocked_keys.items()}
     problems, stack = [], [(value, path)]
     while stack:
         v, p = stack.pop()
         if isinstance(v, dict):
             for k, child in v.items():
-                name = _key_name(k)
+                name = key_name(k)
                 if name in blocked:
                     problems.append(f"{p}.{k}: {blocked[name]}")
                 elif name == "url" and not (isinstance(child, str) and _LINK_URL_RE.match(child)):

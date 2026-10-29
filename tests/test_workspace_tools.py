@@ -188,6 +188,12 @@ class CreateTest(unittest.TestCase):
 
 
 class SheetsTest(unittest.TestCase):
+    def test_シート構成ではグラフのIDとタイトルも取得する(self):
+        s = FakeServices()
+        call(s, "sheets_get_metadata", {"spreadsheet_id": FILE_ID})
+        fields = s.apis["sheets"].spreadsheets.return_value.get.call_args.kwargs["fields"]
+        self.assertIn("charts(chartId,spec(title))", fields)
+
     def test_既定はRAWで書き込む(self):
         s = FakeServices({FILE_ID: MY_FILE})
         call(s, "sheets_write_range", {"spreadsheet_id": FILE_ID, "range": "A1", "values": [["=IMPORTDATA(\"x\")"]]})
@@ -335,11 +341,85 @@ class SheetsBatchUpdateTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
 
     def test_許可リスト外のリクエストは拒否する(self):
-        for kind in ("deleteSheet", "deleteRange", "deleteDimension", "updateCells", "appendCells", "pasteData",
-                     "copyPaste", "cutPaste", "addProtectedRange", "updateProtectedRange",
-                     "addDataSource", "refreshDataSource", "addChart", "addNamedRange", "updateSpreadsheetProperties"):
+        for kind in ("deleteSheet", "deleteTable", "updateTable", "updateNamedRange", "deleteNamedRange",
+                     "updateCells", "appendCells", "pasteData", "addProtectedRange", "updateProtectedRange",
+                     "addDataSource", "refreshDataSource", "updateSpreadsheetProperties", "insertComment"):
             with self.subTest(kind=kind):
                 self._assert_rejected([{kind: {}}], f"{kind} は使えません")
+
+    def test_グラフの作成と編集は通す(self):
+        source = {"sourceRange": {"sources": [{"sheetId": 0, "endRowIndex": 5, "endColumnIndex": 1}]}}
+        chart = {"spec": {"title": "売上", "basicChart": {"chartType": "COLUMN", "domains": [{"domain": source}]}}}
+        requests = [
+            {"addChart": {"chart": chart}},
+            {"updateChartSpec": {"chartId": 1, "spec": chart["spec"]}},
+            {"updateEmbeddedObjectPosition": {"objectId": 1, "newPosition": {"newSheet": True}, "fields": "newSheet"}},
+            {"updateEmbeddedObjectBorder": {"objectId": 1, "border": {"color": {"red": 1}}, "fields": "color"}},
+            {"deleteEmbeddedObject": {"objectId": 2}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_行と列と範囲の挿入_移動_削除とシートの複製は通す(self):
+        rows = {"sheetId": 0, "dimension": "ROWS", "startIndex": 1, "endIndex": 3}
+        requests = [
+            {"insertDimension": {"range": rows, "inheritFromBefore": True}},
+            {"appendDimension": {"sheetId": 0, "dimension": "COLUMNS", "length": 2}},
+            {"moveDimension": {"source": rows, "destinationIndex": 5}},
+            {"deleteDimension": {"range": rows}},
+            {"insertRange": {"range": {"sheetId": 0, "endRowIndex": 1}, "shiftDimension": "ROWS"}},
+            {"deleteRange": {"range": {"sheetId": 0, "endRowIndex": 1}, "shiftDimension": "ROWS"}},
+            {"duplicateSheet": {"sourceSheetId": 0, "newSheetName": "コピー"}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_フィルタ表示や名前付き範囲などの整理とファイル内のコピーは通す(self):
+        grid = {"sheetId": 0, "endRowIndex": 3, "endColumnIndex": 2}
+        requests = [
+            {"addFilterView": {"filter": {"title": "未完了", "range": grid}}},
+            {"addNamedRange": {"namedRange": {"name": "売上", "range": grid}}},
+            {"addDimensionGroup": {"range": {"sheetId": 0, "dimension": "ROWS", "startIndex": 1, "endIndex": 3}}},
+            {"addTable": {"table": {"name": "表1", "range": grid}}},
+            {"copyPaste": {"source": grid, "destination": {**grid, "startRowIndex": 5}, "pasteType": "PASTE_NORMAL"}},
+            {"deleteDuplicates": {"range": grid}},
+            {"trimWhitespace": {"range": grid}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_追加した種類の入れ子にも外部アクセス関数とデータソースの検査がかかる(self):
+        condition = {"type": "TEXT_EQ", "values": [{"userEnteredValue": '=IMPORTXML("https://evil.example", "//a")'}]}
+        view = {"addFilterView": {"filter": {"filterSpecs": [{"columnIndex": 0, "filterCriteria": {"condition": condition}}]}}}
+        self._assert_rejected([view], "IMPORTXML")
+        rule = {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": '=IMAGE("https://evil.example")'}]}}
+        table = {"addTable": {"table": {"range": {"sheetId": 0}, "columnProperties": [{"columnIndex": 0, "dataValidationRule": rule}]}}}
+        self._assert_rejected([table], "IMAGE")
+        for key in ("dataSourceColumnReference", "data_source_column_reference"):
+            with self.subTest(key=key):
+                slicer = {"addSlicer": {"slicer": {"spec": {"filterCriteria": {}, key: {"name": "列"}}}}}
+                self._assert_rejected([slicer], f"spec.{key}")
+
+    def test_テーブルの列に人物やファイルなどのチップは使えない(self):
+        for key in ("columnType", "column_type"):
+            for chip in ("PEOPLE_CHIP", "FILES_CHIP", "FINANCE_CHIP", "PLACE_CHIP"):
+                with self.subTest(key=key, chip=chip):
+                    table = {"addTable": {"table": {"range": {"sheetId": 0}, "columnProperties": [{"columnIndex": 0, key: chip}]}}}
+                    self._assert_rejected([table], f"{key}: {chip}")
+        ok = {"addTable": {"table": {"range": {"sheetId": 0}, "columnProperties": [{"columnIndex": 0, "columnType": "RATINGS_CHIP"}]}}}
+        result, batch = self._call([ok])
+        self.assertFalse(result["isError"], result)
+
+    def test_データソースは書き方にかかわらず拒否する(self):
+        for key in ("dataSourceId", "data_source_id"):
+            with self.subTest(key=key):
+                chart = {"spec": {"dataSourceChartProperties": {key: "ds1"}}}
+                self._assert_rejected([{"addChart": {"chart": chart}}], f"dataSourceChartProperties.{key}")
+                pivot = {"range": {"sheetId": 0}, "cell": {"pivotTable": {key: "ds1"}}, "fields": "userEnteredFormat"}
+                self._assert_rejected([{"repeatCell": pivot}], f"cell.pivotTable.{key}")
 
     def test_repeatCellで値を書き込まない(self):
         cell = {"userEnteredValue": {"formulaValue": "=1+1"}, "userEnteredFormat": {}}
@@ -390,8 +470,8 @@ class SheetsBatchUpdateTest(unittest.TestCase):
 
     def test_シートと列幅のfieldsは許可した項目を通す(self):
         cases = {
-            "updateSheetProperties": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount,tabColorStyle",
-            "updateDimensionProperties": "pixelSize",
+            "updateSheetProperties": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount,tabColorStyle,hidden",
+            "updateDimensionProperties": "pixelSize,hiddenByUser",
         }
         for kind, fields in cases.items():
             with self.subTest(kind=kind):
@@ -401,8 +481,8 @@ class SheetsBatchUpdateTest(unittest.TestCase):
 
     def test_シートと列幅のfieldsは許可した項目だけ(self):
         cases = {
-            "updateSheetProperties": ("title", "gridProperties.rowCount", "hidden", "*", ""),
-            "updateDimensionProperties": ("hiddenByUser", "pixelSize,hiddenByUser", "*", ""),
+            "updateSheetProperties": ("title", "gridProperties.rowCount", "*", ""),
+            "updateDimensionProperties": ("developerMetadata", "pixelSize,developerMetadata", "*", ""),
         }
         for kind, fields_list in cases.items():
             for fields in fields_list:
@@ -657,6 +737,8 @@ class DocsBatchUpdateTest(unittest.TestCase):
             {"createParagraphBullets": {"range": {"startIndex": 6, "endIndex": 21}, "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"}},
             {"insertTable": {"rows": 2, "columns": 2, "endOfSegmentLocation": {}}},
             {"deleteContentRange": {"range": {"startIndex": 30, "endIndex": 40}}},
+            {"createDropdownDefinition": {"dropdownDefinition": {"options": [{"displayText": "未着手"}]}}},
+            {"insertDropdown": {"dropdownDefinitionId": "d.1", "location": {"index": 1}}},
             _link({"url": "https://example.com/a?b=c"}),
             _link({"heading": {"id": "h.1", "tabId": "t.0"}}),
         ]
@@ -745,9 +827,8 @@ class SlidesBatchUpdateTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
 
     def test_外部URLや別ファイルを取り込むリクエストとコメントは拒否する(self):
-        for kind in ("createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
-                     "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
-                     "updateCommentPost", "deleteComment", "deleteCommentReply", "create_image"):
+        for kind in ("createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "insertComment",
+                     "addCommentReply", "updateCommentPost", "deleteComment", "deleteCommentReply", "create_image"):
             with self.subTest(kind=kind):
                 self._assert_rejected([{kind: {}}], f"{kind} は使えません")
 
@@ -784,13 +865,98 @@ class SlidesBatchUpdateTest(unittest.TestCase):
                 self._assert_rejected([request], f"{kind}.{props}.link.url")
 
     def test_外部URLや別ファイルを取り込む種類は許可リストに入れない(self):
-        blocked = {"createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
-                   "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
-                   "updateCommentPost", "deleteComment", "deleteCommentReply"}
+        blocked = {"createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "insertComment",
+                   "addCommentReply", "updateCommentPost", "deleteComment", "deleteCommentReply"}
         self.assertFalse(blocked & slides._BATCH_ALLOWED)
 
     def test_1件でも不正なら全体を拒否する(self):
         self._assert_rejected([{"insertText": {"objectId": "t_12345", "text": "x"}}, {"createImage": {"url": "https://example.com/a.png"}}])
+
+
+SHEET_ID = "1ShEeTiDaBcDeF1234"
+SHARED_SHEET_ID = "1ShArEdShEeT567890"
+
+
+class SlidesChartTest(unittest.TestCase):
+    """スプレッドシートのグラフは、参照先が書き込みガードを通るときだけ取り込む。"""
+
+    def _call(self, requests, sheet=MY_FILE, pres=None):
+        files = {FILE_ID: MY_FILE, SHEET_ID: {**sheet, "id": SHEET_ID}, SHARED_SHEET_ID: SHARED_DRIVE_FILE}
+        s = FakeServices(files)
+        s.slides_presentations.batchUpdate.return_value.execute.return_value = {"replies": []}
+        s.slides_presentations.get.return_value.execute.return_value = pres or {}
+        self.services = s
+        result = call(s, "slides_batch_update", {"presentation_id": FILE_ID, "requests": json.dumps(requests)})
+        return result, s.slides_presentations.batchUpdate
+
+    def _assert_rejected(self, requests, message, **kwargs):
+        result, batch = self._call(requests, **kwargs)
+        self.assertTrue(result["isError"], result)
+        self.assertIn(message, result["content"][0]["text"])
+        batch.assert_not_called()
+
+    @staticmethod
+    def _pres(spreadsheet_id, page="slides"):
+        chart = {"objectId": "chart_1", "sheetsChart": {"spreadsheetId": spreadsheet_id, "chartId": 1}}
+        group = {"objectId": "g_1", "elementGroup": {"children": [chart]}}
+        return {page: [{"objectId": "p1", "pageElements": [group]}]}
+
+    def _create(self, spreadsheet_id=SHEET_ID, **extra):
+        return {"createSheetsChart": {"spreadsheetId": spreadsheet_id, "chartId": 1, "linkingMode": "LINKED", **extra}}
+
+    def test_自分のマイドライブのスプレッドシートのグラフは取り込める(self):
+        replace = {"replaceAllShapesWithSheetsChart": {"containsText": {"text": "{{chart}}"}, "spreadsheet_id": SHEET_ID, "chartId": 1}}
+        result, batch = self._call([self._create(), replace])
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+        checked = {c.kwargs["fileId"] for c in self.services.apis["drive"].files.return_value.get.call_args_list}
+        self.assertIn(SHEET_ID, checked)
+
+    def test_共有ドライブや他人のスプレッドシートのグラフは取り込まない(self):
+        for sheet in (SHARED_DRIVE_FILE, OTHERS_FILE):
+            with self.subTest(sheet=sheet):
+                self._assert_rejected([self._create()], "グラフの参照先", sheet=sheet)
+        # 1 件でも参照先が通らなければ全体を拒否する
+        self._assert_rejected([self._create(), self._create(SHARED_SHEET_ID)], "共有ドライブ")
+        self._assert_rejected([self._create("../bad")], "グラフの参照先")
+
+    def test_参照先は1つの文字列で直下に指定する(self):
+        cases = [
+            {"createSheetsChart": {"chartId": 1}},
+            {"createSheetsChart": {"spreadsheetId": SHEET_ID, "spreadsheet_id": SHEET_ID, "chartId": 1}},
+            {"createSheetsChart": {"spreadsheetId": [SHEET_ID], "chartId": 1}},
+            # 入れ子の中の spreadsheetId は、直下に正しい ID があっても拒否する
+            self._create(elementProperties={"spreadsheetId": SHARED_SHEET_ID}),
+        ]
+        messages = ["ID を 1 つ指定", "ID を 1 つ指定", "ID を 1 つ指定", "elementProperties.spreadsheetId"]
+        for request, message in zip(cases, messages):
+            with self.subTest(request=request):
+                self._assert_rejected([request], message)
+
+    def test_グラフの更新は参照先を調べてから行う(self):
+        refresh = [{"refreshSheetsChart": {"objectId": "chart_1"}}]
+        for page in ("slides", "layouts", "masters"):
+            with self.subTest(page=page):
+                result, batch = self._call(refresh, pres=self._pres(SHEET_ID, page))
+                self.assertFalse(result["isError"], result)
+                batch.assert_called_once()
+        self._assert_rejected(refresh, "グラフの参照先", pres=self._pres(SHARED_SHEET_ID))
+        self._assert_rejected(refresh, "chart_1", pres={"slides": []})
+
+    def test_グラフの更新のobjectIdは1つの文字列で指定する(self):
+        for body in ({"objectId": "chart_1", "object_id": "chart_2"}, {}, {"objectId": ["chart_1"]}):
+            with self.subTest(body=body):
+                self._assert_rejected([{"refreshSheetsChart": body}], "objectId を 1 つ指定", pres=self._pres(SHEET_ID))
+
+    def test_グラフの更新はほかの種類と同じrequestsに入れない(self):
+        # 同じ batch で ID を付け替えると、適用前に調べた参照先と実際に更新するグラフが食い違うため
+        swap = [
+            {"deleteObject": {"objectId": "chart_1"}},
+            {"duplicateObject": {"objectId": "shared_chart", "objectIds": {"shared_chart": "chart_1"}}},
+            {"refreshSheetsChart": {"objectId": "chart_1"}},
+        ]
+        self._assert_rejected(swap, "ほかの種類", pres=self._pres(SHEET_ID))
+        self._assert_rejected([self._create(), {"refreshSheetsChart": {"objectId": "chart_1"}}], "ほかの種類")
 
 
 class DocsSlidesReadTest(unittest.TestCase):
@@ -1097,6 +1263,27 @@ class DocsSlidesReadTest(unittest.TestCase):
         ):
             self.assertIn(expected, text)
         self.assertNotIn("## レイアウト", text)
+
+    def test_構造表示では段落内の改行を目印で示す(self):
+        shape = {"text": {"textElements": [
+            {"endIndex": 6, "paragraphMarker": {}},
+            {"endIndex": 6, "textRun": {"content": "売上\u000b利益\n"}},
+        ]}}
+        s = FakeServices()
+        s.slides_presentations.get.return_value.execute.return_value = {
+            "slides": [{"objectId": "p1", "pageElements": [{"objectId": "t1", "shape": shape}]}]
+        }
+        text = call(s, "slides_read", {"presentation_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("[0-6) 売上↵利益", text)
+        s.docs_documents.get.return_value.execute.return_value = {
+            "tabs": [{"documentTab": {"body": {"content": [
+                {"startIndex": 1, "endIndex": 7, "paragraph": {"elements": [
+                    {"startIndex": 1, "endIndex": 7, "textRun": {"content": "売上\u000b利益\n"}},
+                ]}},
+            ]}}}]
+        }
+        text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        self.assertIn("[1-7) NORMAL_TEXT 売上↵利益", text)
 
 
 if __name__ == "__main__":
