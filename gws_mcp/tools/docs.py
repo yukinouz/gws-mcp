@@ -9,10 +9,16 @@ docs_batch_update は許可リストの種類だけを受け付ける。プロ�
 ドキュメントの外に影響が出ないよう、Google が外部 URL を取りに行く操作と、第三者に通知が届く操作は含めない。
 """
 
-import re
-
 from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
-from gws_mcp.tools._common import BATCH_REJECTED, created, file_id, obj, parse_batch_requests, writable
+from gws_mcp.tools._common import (
+    BATCH_REJECTED,
+    created,
+    external_ref_problems,
+    file_id,
+    obj,
+    parse_batch_requests,
+    writable,
+)
 
 _DOCUMENT_ID = file_id("ドキュメントの ID")
 _TEXT = {"type": "string", "minLength": 1, "maxLength": 200_000}
@@ -65,8 +71,8 @@ _BATCH_ALLOWED = frozenset(
 )
 _MAX_BATCH_REQUESTS = 200
 _MAX_BATCH_TEXT = 200_000
-# リンク（Link.url）に許すスキーム。表示されるだけでクリックしない限り何も送られないため、Web のリンクは許可する
-_LINK_URL_RE = re.compile(r"https?://", re.IGNORECASE)
+# Docs で Google が取りに行く URL は uri（画像）だけ。リンクの url は共通の検査で http(s) に限る
+_BLOCKED_KEYS = {"uri": "外部 URL の取得（画像など）は使えません"}
 
 
 def _elements_text(elements: list) -> str:
@@ -185,36 +191,13 @@ def docs_read(services, args):
     return f"# {doc.get('title')}\n\n{text}"
 
 
-def _url_problems(value, path: str) -> list:
-    """入れ子の中のすべての uri・url を探し、問題の説明を返す。
-
-    uri は Google が取りに行く URL（画像など）なので、どこにあっても拒否する。本文を URL に埋め込んで外部に送れるため。
-    種類の許可リストをすり抜ける指定も拾えるよう、リクエストの種類ではなくキーの名前で探す。
-    入れ子が深くても再帰の上限に当たらないよう、スタックでたどる。
-    """
-    problems, stack = [], [(value, path)]
-    while stack:
-        v, p = stack.pop()
-        if isinstance(v, dict):
-            for k, child in v.items():
-                if k == "uri":
-                    problems.append(f"{p}.{k}: 外部 URL の取得（画像など）は使えません")
-                elif k == "url" and not (isinstance(child, str) and _LINK_URL_RE.match(child)):
-                    problems.append(f"{p}.{k}: リンクは http:// か https:// で始まる URL にしてください")
-                else:
-                    stack.append((child, f"{p}.{k}"))
-        elif isinstance(v, list):
-            stack.extend((child, f"{p}[{i}]") for i, child in enumerate(v))
-    return problems
-
-
 def _validate_batch_requests(text: str) -> list:
     """docs_batch_update のリクエストを検査し、1つでも問題があれば API を呼ばずに全体を拒否する。"""
     requests = parse_batch_requests(text, _BATCH_ALLOWED, _MAX_BATCH_REQUESTS)
     problems = []
     for i, req in enumerate(requests):
         kind, body = next(iter(req.items()))
-        problems += _url_problems(body, f"requests[{i}].{kind}")
+        problems += external_ref_problems(body, f"requests[{i}].{kind}", _BLOCKED_KEYS)
     if problems:
         raise ToolError(BATCH_REJECTED + "問題: " + "、".join(problems))
     return requests

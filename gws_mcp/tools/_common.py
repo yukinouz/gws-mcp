@@ -1,12 +1,17 @@
 """ツール定義で共通に使う部品。"""
 
 import json
+import re
+from collections.abc import Mapping
 
 from gws_mcp.guard import FILE_ID_PATTERN, assert_writable_file
 from gws_mcp.tools import ToolError
 
 # batchUpdate のリクエストを拒否したときのエラー文の書き出し
 BATCH_REJECTED = "リクエストに問題があるため、何も変更していません。"
+
+# リンク（Link.url）に許すスキーム。表示されるだけでクリックしない限り何も送られないため、Web のリンクは許可する
+_LINK_URL_RE = re.compile(r"https?://", re.IGNORECASE)
 
 
 def obj(properties: dict, required: list | None = None) -> dict:
@@ -71,3 +76,39 @@ def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> li
             + "、".join(problems)
         )
     return requests
+
+
+def _key_name(key: str) -> str:
+    """キーの名前を、camelCase と snake_case の違いを無視して比べられる形にする。
+
+    API は text_style のような snake_case のキーも受け付けるため、content_url などの書き方で検査をすり抜けさせない。
+    """
+    return key.replace("_", "").lower()
+
+
+def external_ref_problems(value, path: str, blocked_keys: Mapping[str, str]) -> list:
+    """入れ子の中の、拒否するキーと url を探し、問題の説明を返す。
+
+    blocked_keys は拒否するキーと、その説明。Google が取りに行く URL（本文を埋め込んで外部に送れる）や、
+    別ファイルの ID（書き込みガードの外にあるファイルの中身を取り込める）を表すキーを渡す。
+    url はリンクとして扱い、http(s) だけ許可する。Google が取りに行く url を持つ種類（画像の挿入など）は、
+    種類の許可リストに入れないことで止める。
+    種類の許可リストをすり抜ける指定も拾えるよう、リクエストの種類ではなくキーの名前で探す。
+    入れ子が深くても再帰の上限に当たらないよう、スタックでたどる。
+    """
+    blocked = {_key_name(k): message for k, message in blocked_keys.items()}
+    problems, stack = [], [(value, path)]
+    while stack:
+        v, p = stack.pop()
+        if isinstance(v, dict):
+            for k, child in v.items():
+                name = _key_name(k)
+                if name in blocked:
+                    problems.append(f"{p}.{k}: {blocked[name]}")
+                elif name == "url" and not (isinstance(child, str) and _LINK_URL_RE.match(child)):
+                    problems.append(f"{p}.{k}: リンクは http:// か https:// で始まる URL にしてください")
+                else:
+                    stack.append((child, f"{p}.{k}"))
+        elif isinstance(v, list):
+            stack.extend((child, f"{p}[{i}]") for i, child in enumerate(v))
+    return problems

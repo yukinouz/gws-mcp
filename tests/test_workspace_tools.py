@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from gws_mcp.schema import SchemaError, validate
 from gws_mcp.server import MCPServer
-from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, GUARD_OWN_EVENT, load_tools
+from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, GUARD_OWN_EVENT, load_tools, slides
 
 FILE_ID = "1AbCdEfGhIjKlMnOp"
 NEW_ID = "1NeWfIlEiDxYz9876"
@@ -97,6 +97,10 @@ WRITE_TOOLS = {
     "slides_add_text_slide": ({"presentation_id": FILE_ID, "title": "x"}, lambda s: s.slides_presentations.batchUpdate),
     "slides_replace_text": (
         {"presentation_id": FILE_ID, "find": "a", "replace": "b"},
+        lambda s: s.slides_presentations.batchUpdate,
+    ),
+    "slides_batch_update": (
+        {"presentation_id": FILE_ID, "requests": '[{"deleteObject": {"objectId": "s_12345"}}]'},
         lambda s: s.slides_presentations.batchUpdate,
     ),
 }
@@ -693,6 +697,102 @@ class DocsBatchUpdateTest(unittest.TestCase):
         self._assert_rejected([{"insertText": {"text": "x", "endOfSegmentLocation": {}}}, {"insertInlineImage": {}}])
 
 
+def _slide_link(link: dict) -> dict:
+    return {
+        "updateTextStyle": {
+            "objectId": "t_12345",
+            "textRange": {"type": "ALL"},
+            "style": {"link": link},
+            "fields": "link",
+        }
+    }
+
+
+class SlidesBatchUpdateTest(unittest.TestCase):
+    def _call(self, requests):
+        """requests を JSON 文字列にして呼ぶ。結果と batchUpdate のモックを返す。"""
+        s = FakeServices({FILE_ID: MY_FILE})
+        s.slides_presentations.batchUpdate.return_value.execute.return_value = {"replies": [{}] * len(requests)}
+        text = requests if isinstance(requests, str) else json.dumps(requests)
+        return call(s, "slides_batch_update", {"presentation_id": FILE_ID, "requests": text}), s.slides_presentations.batchUpdate
+
+    def _assert_rejected(self, requests, *messages):
+        result, batch = self._call(requests)
+        self.assertTrue(result["isError"], result)
+        for m in messages:
+            self.assertIn(m, result["content"][0]["text"])
+        batch.assert_not_called()
+
+    def test_スライドと図形と表と削除のリクエストをそのまま渡しrepliesを返す(self):
+        requests = [
+            {"createSlide": {"objectId": "slide_new1", "slideLayoutReference": {"predefinedLayout": "TITLE_AND_BODY"}}},
+            {"duplicateObject": {"objectId": "p1"}},
+            {"createShape": {"objectId": "box_1", "shapeType": "RECTANGLE", "elementProperties": {"pageObjectId": "slide_new1"}}},
+            {"createTable": {"objectId": "tbl_1", "rows": 2, "columns": 2, "elementProperties": {"pageObjectId": "slide_new1"}}},
+            {"insertText": {"objectId": "box_1", "text": "売上"}},
+            {"updatePageProperties": {"objectId": "slide_new1", "pageProperties": {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": {"blue": 1}}}}}, "fields": "pageBackgroundFill.solidFill.color"}},
+            {"deleteObject": {"objectId": "p2"}},
+            {"updateShapeProperties": {"objectId": "box_1", "shapeProperties": {"link": {"slideIndex": 2}}, "fields": "link"}},
+            {"updateImageProperties": {"objectId": "img_1", "imageProperties": {"brightness": 0.2}, "fields": "brightness"}},
+            {"updateVideoProperties": {"objectId": "vid_1", "videoProperties": {"mute": True}, "fields": "mute"}},
+            _slide_link({"url": "https://example.com/a?b=c"}),
+            _slide_link({"pageObjectId": "p1"}),
+            _slide_link({"relativeLink": "NEXT_SLIDE"}),
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(batch.call_args.kwargs, {"presentationId": FILE_ID, "body": {"requests": requests}})
+        self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
+
+    def test_外部URLや別ファイルを取り込むリクエストとコメントは拒否する(self):
+        for kind in ("createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
+                     "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
+                     "updateCommentPost", "deleteComment", "deleteCommentReply", "create_image"):
+            with self.subTest(kind=kind):
+                self._assert_rejected([{kind: {}}], f"{kind} は使えません")
+
+    def test_背景画像のURLは書き方にかかわらず拒否する(self):
+        for key in ("contentUrl", "content_url"):
+            with self.subTest(key=key):
+                background = {
+                    "updatePageProperties": {
+                        "objectId": "p1",
+                        "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {key: "https://evil.example/?q=秘密"}}},
+                        "fields": "pageBackgroundFill",
+                    }
+                }
+                self._assert_rejected([background], f"pageBackgroundFill.stretchedPictureFill.{key}")
+
+    def test_入れ子の画像URLとスプレッドシートIDは種類にかかわらず拒否する(self):
+        for key in ("imageUrl", "image_url", "spreadsheetId", "spreadsheet_id"):
+            with self.subTest(key=key):
+                self._assert_rejected([{"insertText": {"objectId": "t_12345", "text": "x", "extra": {key: "x"}}}], f"insertText.extra.{key}")
+
+    def test_httpとhttps以外のリンクは拒否する(self):
+        for url in ("javascript:alert(1)", "ftp://example.com", "", 1, "//example.com"):
+            with self.subTest(url=url):
+                self._assert_rejected([_slide_link({"url": url})], "style.link.url")
+
+    def test_図形と画像と線のリンクも検査する(self):
+        for kind, props in (
+            ("updateShapeProperties", "shapeProperties"),
+            ("updateImageProperties", "imageProperties"),
+            ("updateLineProperties", "lineProperties"),
+        ):
+            with self.subTest(kind=kind):
+                request = {kind: {"objectId": "s_12345", props: {"link": {"url": "javascript:alert(1)"}}, "fields": "link"}}
+                self._assert_rejected([request], f"{kind}.{props}.link.url")
+
+    def test_外部URLや別ファイルを取り込む種類は許可リストに入れない(self):
+        blocked = {"createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
+                   "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
+                   "updateCommentPost", "deleteComment", "deleteCommentReply"}
+        self.assertFalse(blocked & slides._BATCH_ALLOWED)
+
+    def test_1件でも不正なら全体を拒否する(self):
+        self._assert_rejected([{"insertText": {"objectId": "t_12345", "text": "x"}}, {"createImage": {"url": "https://example.com/a.png"}}])
+
+
 class DocsSlidesReadTest(unittest.TestCase):
     def test_ドキュメントの段落と表を読む(self):
         s = FakeServices()
@@ -850,6 +950,153 @@ class DocsSlidesReadTest(unittest.TestCase):
         }
         text = call(s, "slides_read", {"presentation_id": FILE_ID})["content"][0]["text"]
         self.assertIn("表紙タイトル", text)
+
+    def test_スライドの構造表示ではIDと位置と大きさを返す(self):
+        def emu(pt):
+            return {"magnitude": pt * 12_700, "unit": "EMU"}
+
+        s = FakeServices()
+        s.slides_presentations.get.return_value.execute.return_value = {
+            "title": "提案",
+            "pageSize": {"width": emu(720), "height": emu(405)},
+            "layouts": [{"objectId": "l_2", "layoutProperties": {"name": "TITLE_AND_BODY", "displayName": "タイトルと本文"}}],
+            "slides": [
+                {
+                    "objectId": "p1",
+                    "slideProperties": {
+                        "layoutObjectId": "l_2",
+                        "notesPage": {
+                            "notesProperties": {"speakerNotesObjectId": "n1"},
+                            "pageElements": [{"objectId": "n1", "shape": {"shapeType": "TEXT_BOX"}}],
+                        },
+                    },
+                    "pageElements": [
+                        {
+                            "objectId": "t1",
+                            "size": {"width": emu(300), "height": emu(50)},
+                            "transform": {"scaleX": 2, "scaleY": 1, "translateX": 40 * 12_700, "translateY": 30 * 12_700, "unit": "EMU"},
+                            "shape": {
+                                "shapeType": "TEXT_BOX",
+                                "placeholder": {"type": "TITLE"},
+                                "text": {
+                                    "textElements": [
+                                        {"endIndex": 7, "paragraphMarker": {}},
+                                        {"endIndex": 3, "textRun": {"content": "四半期"}},
+                                        {"startIndex": 3, "endIndex": 7, "textRun": {"content": "の振り返\n"}},
+                                        {"startIndex": 7, "endIndex": 10, "paragraphMarker": {"bullet": {"nestingLevel": 1}}},
+                                        {"startIndex": 7, "endIndex": 10, "textRun": {"content": "売上\n"}},
+                                    ]
+                                },
+                            },
+                        },
+                        {
+                            "objectId": "tb1",
+                            "table": {
+                                "rows": 1,
+                                "columns": 1,
+                                "tableRows": [{"tableCells": [{"text": {"textElements": [
+                                    {"endIndex": 3, "paragraphMarker": {}},
+                                    {"endIndex": 3, "textRun": {"content": "項目\n"}},
+                                ]}}]}],
+                            },
+                        },
+                        {"objectId": "img1", "image": {}, "transform": {"scaleX": 1, "scaleY": 1, "translateX": 10, "unit": "PT"}},
+                        {
+                            "objectId": "g1",
+                            "elementGroup": {"children": [{"objectId": "c1", "line": {}, "transform": {"translateY": 5, "unit": "PT"}}]},
+                        },
+                    ],
+                }
+            ],
+        }
+        text = call(s, "slides_read", {"presentation_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        for expected in (
+            "## スライド 1（objectId: p1, レイアウト: TITLE_AND_BODY）",
+            "図形 t1 TEXT_BOX 位置(40,30pt) 大きさ(600×50pt) プレースホルダー: TITLE",
+            "  [0-7) 四半期の振り返",
+            "    [0-3) 四半期",
+            "    [3-7) の振り返",
+            "  [7-10) 箇条書き(階層1) 売上",
+            "表 tb1 1行×1列 位置(0,0pt)",
+            "    [0-3) 項目",
+            "画像 img1 位置(10,0pt)",
+            "グループ g1 位置(0,0pt)",
+            "  線 c1 グループ基準: 位置(0,5pt)",
+            "（スピーカーノート objectId: n1）",
+            "l_2 TITLE_AND_BODY「タイトルと本文」",
+            "ページの大きさ 720×405pt",
+        ):
+            self.assertIn(expected, text)
+        # 段落が 1 つの範囲だけなら、範囲ごとの行は出さない
+        self.assertNotIn("    [7-10) 売上", text)
+        plain = call(s, "slides_read", {"presentation_id": FILE_ID})["content"][0]["text"]
+        self.assertNotIn("objectId: t1", plain)
+        self.assertIn("四半期の振り返", plain)
+
+    def test_スライドの構造表示では回転や入れ子のグループ_自動テキスト_ノートの中身も示す(self):
+        def pt(value):
+            return {"magnitude": value, "unit": "PT"}
+
+        s = FakeServices()
+        s.slides_presentations.get.return_value.execute.return_value = {
+            "title": "提案",
+            "slides": [
+                {
+                    "objectId": "p1",
+                    "slideProperties": {
+                        "notesPage": {
+                            "notesProperties": {"speakerNotesObjectId": "n1"},
+                            "pageElements": [
+                                {
+                                    "objectId": "n1",
+                                    "shape": {"text": {"textElements": [
+                                        {"endIndex": 5, "paragraphMarker": {}},
+                                        {"endIndex": 5, "textRun": {"content": "冒頭で話す\n"}},
+                                    ]}},
+                                }
+                            ],
+                        },
+                    },
+                    "pageElements": [
+                        # 90 度回転: 元の左上 (100,50) が右上に来るため、外接矩形の左上は x が高さの分だけ左
+                        {
+                            "objectId": "r1",
+                            "size": {"width": pt(200), "height": pt(40)},
+                            "transform": {"shearX": -1, "shearY": 1, "translateX": 100, "translateY": 50, "unit": "PT"},
+                            "shape": {"shapeType": "RECTANGLE"},
+                        },
+                        # transform がなければ等倍・原点
+                        {"objectId": "z1", "size": {"width": pt(30), "height": pt(20)}, "image": {}},
+                        {
+                            "objectId": "s1",
+                            "shape": {"shapeType": "TEXT_BOX", "text": {"textElements": [
+                                {"endIndex": 1, "paragraphMarker": {}},
+                                {"endIndex": 1, "textRun": {"content": "\n"}},
+                                {"startIndex": 1, "endIndex": 2, "paragraphMarker": {}},
+                                {"startIndex": 1, "endIndex": 2, "autoText": {"type": "SLIDE_NUMBER"}},
+                            ]}},
+                        },
+                        {
+                            "objectId": "g1",
+                            "elementGroup": {"children": [
+                                {"objectId": "g2", "elementGroup": {"children": [{"objectId": "v1", "video": {}}]}}
+                            ]},
+                        },
+                    ],
+                }
+            ],
+        }
+        text = call(s, "slides_read", {"presentation_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        for expected in (
+            "図形 r1 RECTANGLE 位置(60,50pt) 大きさ(40×200pt) 回転・反転あり",
+            "画像 z1 位置(0,0pt) 大きさ(30×20pt)",
+            "  [0-1) （空行）",
+            "  [1-2) [自動テキスト]",
+            "    動画 v1 グループ基準: 位置(0,0pt)",
+            "  [0-5) 冒頭で話す",
+        ):
+            self.assertIn(expected, text)
+        self.assertNotIn("## レイアウト", text)
 
 
 if __name__ == "__main__":
