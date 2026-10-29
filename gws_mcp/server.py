@@ -30,7 +30,7 @@ SERVER_INFO = {"name": "gws-mcp", "version": __version__}
 INSTRUCTIONS = (
     "Google Workspace MCP サーバー。"
     "書き込みはマイドライブのファイルに限られ、共有ドライブは読み取り専用。"
-    "削除操作は提供しない。Gmail は読み取りのみ。"
+    "ファイルの削除操作は提供しない。Gmail は読み取りのみ。"
 )
 
 # _meta の予約キー
