@@ -355,6 +355,7 @@ class SheetsBatchUpdateTest(unittest.TestCase):
             {"addChart": {"chart": chart}},
             {"updateChartSpec": {"chartId": 1, "spec": chart["spec"]}},
             {"updateEmbeddedObjectPosition": {"objectId": 1, "newPosition": {"newSheet": True}, "fields": "newSheet"}},
+            {"updateEmbeddedObjectBorder": {"objectId": 1, "border": {"color": {"red": 1}}, "fields": "color"}},
             {"deleteEmbeddedObject": {"objectId": 2}},
         ]
         result, batch = self._call(requests)
@@ -381,6 +382,8 @@ class SheetsBatchUpdateTest(unittest.TestCase):
             with self.subTest(key=key):
                 chart = {"spec": {"dataSourceChartProperties": {key: "ds1"}}}
                 self._assert_rejected([{"addChart": {"chart": chart}}], f"dataSourceChartProperties.{key}")
+                pivot = {"range": {"sheetId": 0}, "cell": {"pivotTable": {key: "ds1"}}, "fields": "userEnteredFormat"}
+                self._assert_rejected([{"repeatCell": pivot}], f"cell.pivotTable.{key}")
 
     def test_repeatCellで値を書き込まない(self):
         cell = {"userEnteredValue": {"formulaValue": "=1+1"}, "userEnteredFormat": {}}

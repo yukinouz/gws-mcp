@@ -88,7 +88,7 @@ _BATCH_ALLOWED = frozenset(
     }
 )
 # 許可した種類の中にも入れられる、外部データにつながるキー。
-# グラフやフィルタは dataSourceId で BigQuery などのデータソースを参照できる
+# グラフやピボットテーブルは dataSourceId で BigQuery などのデータソースを参照できる
 _BLOCKED_KEYS = {"dataSourceId": "データソース（BigQuery などの外部データ）は使えません"}
 _MAX_BATCH_REQUESTS = 200
 _MAX_BATCH_TEXT = 200_000
@@ -430,7 +430,7 @@ TOOLS = [
     ),
     Tool(
         name="sheets_batch_update",
-        title="書式・並べ替え・置換",
+        title="書式・並べ替え・置換・グラフ",
         description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換・グラフの作成と編集、"
         "行・列の挿入と削除を行う。"
         "対象は自分が所有するマイドライブのファイルに限る。"
