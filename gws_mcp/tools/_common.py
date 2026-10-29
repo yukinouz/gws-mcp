@@ -78,7 +78,7 @@ def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> li
     return requests
 
 
-def _key_name(key: str) -> str:
+def key_name(key: str) -> str:
     """キーの名前を、camelCase と snake_case の違いを無視して比べられる形にする。
 
     API は text_style のような snake_case のキーも受け付けるため、content_url などの書き方で検査をすり抜けさせない。
@@ -96,13 +96,13 @@ def external_ref_problems(value, path: str, blocked_keys: Mapping[str, str]) -> 
     種類の許可リストをすり抜ける指定も拾えるよう、リクエストの種類ではなくキーの名前で探す。
     入れ子が深くても再帰の上限に当たらないよう、スタックでたどる。
     """
-    blocked = {_key_name(k): message for k, message in blocked_keys.items()}
+    blocked = {key_name(k): message for k, message in blocked_keys.items()}
     problems, stack = [], [(value, path)]
     while stack:
         v, p = stack.pop()
         if isinstance(v, dict):
             for k, child in v.items():
-                name = _key_name(k)
+                name = key_name(k)
                 if name in blocked:
                     problems.append(f"{p}.{k}: {blocked[name]}")
                 elif name == "url" and not (isinstance(child, str) and _LINK_URL_RE.match(child)):

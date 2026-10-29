@@ -786,9 +786,8 @@ class SlidesBatchUpdateTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
 
     def test_外部URLや別ファイルを取り込むリクエストとコメントは拒否する(self):
-        for kind in ("createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
-                     "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
-                     "updateCommentPost", "deleteComment", "deleteCommentReply", "create_image"):
+        for kind in ("createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "insertComment",
+                     "addCommentReply", "updateCommentPost", "deleteComment", "deleteCommentReply", "create_image"):
             with self.subTest(kind=kind):
                 self._assert_rejected([{kind: {}}], f"{kind} は使えません")
 
@@ -825,13 +824,76 @@ class SlidesBatchUpdateTest(unittest.TestCase):
                 self._assert_rejected([request], f"{kind}.{props}.link.url")
 
     def test_外部URLや別ファイルを取り込む種類は許可リストに入れない(self):
-        blocked = {"createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "createSheetsChart",
-                   "replaceAllShapesWithSheetsChart", "refreshSheetsChart", "insertComment", "addCommentReply",
-                   "updateCommentPost", "deleteComment", "deleteCommentReply"}
+        blocked = {"createImage", "replaceImage", "replaceAllShapesWithImage", "createVideo", "insertComment",
+                   "addCommentReply", "updateCommentPost", "deleteComment", "deleteCommentReply"}
         self.assertFalse(blocked & slides._BATCH_ALLOWED)
 
     def test_1件でも不正なら全体を拒否する(self):
         self._assert_rejected([{"insertText": {"objectId": "t_12345", "text": "x"}}, {"createImage": {"url": "https://example.com/a.png"}}])
+
+
+SHEET_ID = "1ShEeTiDaBcDeF1234"
+SHARED_SHEET_ID = "1ShArEdShEeT567890"
+
+
+class SlidesChartTest(unittest.TestCase):
+    """スプレッドシートのグラフは、参照先が書き込みガードを通るときだけ取り込む。"""
+
+    def _call(self, requests, sheet=MY_FILE, pres=None):
+        files = {FILE_ID: MY_FILE, SHEET_ID: {**sheet, "id": SHEET_ID}, SHARED_SHEET_ID: SHARED_DRIVE_FILE}
+        s = FakeServices(files)
+        s.slides_presentations.batchUpdate.return_value.execute.return_value = {"replies": []}
+        s.slides_presentations.get.return_value.execute.return_value = pres or {}
+        result = call(s, "slides_batch_update", {"presentation_id": FILE_ID, "requests": json.dumps(requests)})
+        return result, s.slides_presentations.batchUpdate
+
+    def _create(self, spreadsheet_id=SHEET_ID, **extra):
+        return {"createSheetsChart": {"spreadsheetId": spreadsheet_id, "chartId": 1, "linkingMode": "LINKED", **extra}}
+
+    def test_自分のマイドライブのスプレッドシートのグラフは取り込める(self):
+        replace = {"replaceAllShapesWithSheetsChart": {"containsText": {"text": "{{chart}}"}, "spreadsheet_id": SHEET_ID, "chartId": 1}}
+        result, batch = self._call([self._create(), replace])
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_共有ドライブや他人のスプレッドシートのグラフは取り込まない(self):
+        for sheet in (SHARED_DRIVE_FILE, OTHERS_FILE):
+            with self.subTest(sheet=sheet):
+                result, batch = self._call([self._create()], sheet=sheet)
+                self.assertTrue(result["isError"], result)
+                self.assertIn("グラフの参照先", result["content"][0]["text"])
+                batch.assert_not_called()
+
+    def test_参照先は1つの文字列で直下に指定する(self):
+        cases = [
+            {"createSheetsChart": {"chartId": 1}},
+            {"createSheetsChart": {"spreadsheetId": SHEET_ID, "spreadsheet_id": SHEET_ID, "chartId": 1}},
+            {"createSheetsChart": {"spreadsheetId": [SHEET_ID], "chartId": 1}},
+            # 入れ子の中の spreadsheetId は、直下に正しい ID があっても拒否する
+            self._create(elementProperties={"spreadsheetId": SHARED_SHEET_ID}),
+        ]
+        for request in cases:
+            with self.subTest(request=request):
+                result, batch = self._call([request])
+                self.assertTrue(result["isError"], result)
+                batch.assert_not_called()
+
+    def test_グラフの更新は参照先を調べてから行う(self):
+        def pres(spreadsheet_id):
+            chart = {"objectId": "chart_1", "sheetsChart": {"spreadsheetId": spreadsheet_id, "chartId": 1}}
+            group = {"objectId": "g_1", "elementGroup": {"children": [chart]}}
+            return {"slides": [{"objectId": "p1", "pageElements": [group]}]}
+
+        refresh = [{"refreshSheetsChart": {"objectId": "chart_1"}}]
+        result, batch = self._call(refresh, pres=pres(SHEET_ID))
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+        for pres_body, message in ((pres(SHARED_SHEET_ID), "グラフの参照先"), ({"slides": []}, "chart_1")):
+            with self.subTest(message=message):
+                result, batch = self._call(refresh, pres=pres_body)
+                self.assertTrue(result["isError"], result)
+                self.assertIn(message, result["content"][0]["text"])
+                batch.assert_not_called()
 
 
 class DocsSlidesReadTest(unittest.TestCase):
