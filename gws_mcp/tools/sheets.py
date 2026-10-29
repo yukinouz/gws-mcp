@@ -8,12 +8,16 @@
 電話番号（"+81-..."）や "=" で始まる文章が意図せず数式になるのを防ぐため。
 数式は USER_ENTERED を指定すれば使える。ただし外部 URL にアクセスする関数
 （IMPORTDATA など）は、シートの内容を外部に送信できてしまうため、指定にかかわらず拒否する。
+
+書式・並べ替え・検索と置換は sheets_batch_update で行える。許可リストの種類だけを受け付け、
+削除や外部への接続はできない。repeatCell は範囲全体の値を一度に上書きできるため値を受け付けず、
+値の書き込みは RAW と USER_ENTERED を選べる sheets_write_range に寄せる。
 """
 
 import re
 
 from gws_mcp.tools import GUARD_CREATED, GUARD_MYDRIVE, Tool, ToolError
-from gws_mcp.tools._common import created, file_id, obj, writable
+from gws_mcp.tools._common import BATCH_REJECTED, created, file_id, obj, parse_batch_requests, writable
 
 # Google が引数の URL にアクセスする関数。URL にセルの値を埋め込まれると外部に送られる。
 # IMPORTRANGE（Google スプレッドシート間の参照）や HYPERLINK（表示のみ）は外部に出ないので対象外。
@@ -41,6 +45,37 @@ _FORMULA_NOTE = (
 )
 _SHEET_TITLE = {"type": "string", "minLength": 1, "maxLength": 100}
 
+# sheets_batch_update で使えるリクエスト。削除・外部接続・権限の変更は含めない
+_BATCH_ALLOWED = frozenset(
+    {
+        "repeatCell",
+        "updateBorders",
+        "updateDimensionProperties",
+        "autoResizeDimensions",
+        "updateSheetProperties",
+        "setBasicFilter",
+        "clearBasicFilter",
+        "addBanding",
+        "addConditionalFormatRule",
+        "setDataValidation",
+        "mergeCells",
+        "unmergeCells",
+        "sortRange",
+        "findReplace",
+    }
+)
+_MAX_BATCH_REQUESTS = 200
+_MAX_BATCH_TEXT = 200_000
+# fields（上書きする項目）を絞る種類と、許可する項目。それ以外の項目は表示や構造を大きく変えるため
+_BATCH_ALLOWED_FIELDS = {
+    "updateSheetProperties": {"gridProperties.frozenRowCount", "gridProperties.frozenColumnCount", "tabColorStyle"},
+    "updateDimensionProperties": {"pixelSize"},
+}
+# fields の項目名。英数字とアンダースコアの名前をピリオドでつなぐ
+_FIELD_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+# fields の括弧の入れ子の上限。書式の指定ではこれより深くならない
+_MAX_FIELD_DEPTH = 5
+
 
 def _reject_external_fetch(values):
     """外部 URL にアクセスする関数を含むセルがあれば、該当セルを列挙して ToolError を送出する。
@@ -60,6 +95,114 @@ def _reject_external_fetch(values):
             + "該当セル（0 始まりの行・列番号）: "
             + "、".join(hits)
         )
+
+
+def _split_fields(fields, depth: int = 0) -> list | None:
+    """fields（FieldMask）を最上位のカンマで分け、各項目が "a.b" か "a.b(…)" の形かを確かめる。
+
+    "a(b,c),d" は ["a(b,c)", "d"] になる。形が不正なら None を返す。
+    値の項目を書式の項目に見せかける書き方を、API 側の解釈に任せず、呼ぶ前に止めるため。
+    """
+    if not isinstance(fields, str) or depth > _MAX_FIELD_DEPTH:
+        return None
+    # 空白（ASCII のみ）はカンマと括弧の前後だけ許す。項目名の途中の空白は不正として残す
+    fields = re.sub(r"[ \t\r\n]*([,()])[ \t\r\n]*", r"\1", fields).strip(" \t\r\n")
+    parts, level, start = [], 0, 0
+    for i, ch in enumerate(fields):
+        if ch == "(":
+            level += 1
+        elif ch == ")":
+            level -= 1
+            if level < 0:
+                return None
+        elif ch == "," and level == 0:
+            parts.append(fields[start:i])
+            start = i + 1
+    if level != 0:
+        return None
+    parts.append(fields[start:])
+    if parts == [""]:
+        return []
+    return parts if all(_is_valid_field(p, depth) for p in parts) else None
+
+
+def _is_valid_field(part: str, depth: int) -> bool:
+    """"a.b" か "a.b(…)" の形だけを許す。閉じ括弧の後ろに文字があれば不正。"""
+    m = _FIELD_PATH_RE.match(part)
+    if not m:
+        return False
+    rest = part[m.end() :]
+    if not rest:
+        return True
+    if not (rest.startswith("(") and rest.endswith(")")):
+        return False
+    return bool(_split_fields(rest[1:-1], depth + 1))
+
+
+def _is_format_field(field: str) -> bool:
+    return field == "userEnteredFormat" or field.startswith(("userEnteredFormat.", "userEnteredFormat("))
+
+
+def _check_fields(body: dict, path: str, is_allowed, hint: str) -> list:
+    """fields を分けて、許可しない項目があれば問題の説明を返す。"""
+    fields = _split_fields(body.get("fields"))
+    if not fields:
+        return [f"{path}.fields: 形が不正か空です。使える項目: {hint}"]
+    return [f"{path}.fields: {f} は使えません。使える項目: {hint}" for f in fields if not is_allowed(f)]
+
+
+def _check_batch_request(kind: str, body: dict, path: str) -> list:
+    """値を書き込む指定や、許可しない fields を探し、問題の説明を返す。"""
+    problems = []
+    if kind == "repeatCell":
+        cell = body.get("cell", {})
+        # 値を消さないための本当の防御は fields の検査。cell の検査は、値を渡した意図に気づかせるためのもの
+        if not isinstance(cell, dict):
+            problems.append(f"{path}.cell: オブジェクトにしてください")
+        elif value_keys := {"userEnteredValue", "user_entered_value"} & set(cell):
+            problems.append(f"{path}.cell.{min(value_keys)}: 値は sheets_write_range で書き込んでください")
+        # fields に値の項目や "*" を含めると、cell に値がなくても範囲の値が消える
+        problems += _check_fields(body, path, _is_format_field, "userEnteredFormat で始まる項目")
+    elif kind in _BATCH_ALLOWED_FIELDS:
+        allowed = _BATCH_ALLOWED_FIELDS[kind]
+        problems += _check_fields(body, path, allowed.__contains__, " ".join(sorted(allowed)))
+    return problems
+
+
+def _external_fetch_hits(value, path: str) -> list:
+    """入れ子の中のすべての文字列から外部 URL にアクセスする関数を探す。
+
+    条件付き書式やプルダウンの条件の値（ConditionValue.userEnteredValue）には数式を書けるため。
+    入れ子が深くても再帰の上限に当たらないよう、スタックでたどる。
+    """
+    hits, stack = [], [(value, path)]
+    while stack:
+        v, p = stack.pop()
+        if isinstance(v, str):
+            if m := _EXTERNAL_FETCH_RE.search(v):
+                hits.append(f"{p}（{m.group(1).upper()}）")
+        elif isinstance(v, dict):
+            stack.extend((child, f"{p}.{k}") for k, child in v.items())
+        elif isinstance(v, list):
+            stack.extend((child, f"{p}[{i}]") for i, child in enumerate(v))
+    return hits
+
+
+def _validate_batch_requests(text: str) -> list:
+    """sheets_batch_update のリクエストを検査し、1つでも問題があれば API を呼ばずに全体を拒否する。"""
+    requests = parse_batch_requests(text, _BATCH_ALLOWED, _MAX_BATCH_REQUESTS)
+    problems, hits = [], []
+    for i, req in enumerate(requests):
+        kind, body = next(iter(req.items()))
+        problems += _check_batch_request(kind, body, f"requests[{i}].{kind}")
+        hits += _external_fetch_hits(body, f"requests[{i}].{kind}")
+    if hits:
+        problems.append(
+            "外部 URL にアクセスする関数（" + " ".join(_EXTERNAL_FETCH_FUNCTIONS) + "）は使えません: " + "、".join(hits)
+        )
+    if problems:
+        raise ToolError(BATCH_REJECTED + "問題: " + "、".join(problems))
+    return requests
 
 
 def sheets_get_metadata(services, args):
@@ -150,6 +293,20 @@ def sheets_add_sheet(services, args):
     return res["replies"][0]["addSheet"]["properties"]
 
 
+def sheets_batch_update(services, args):
+    # 入力の検査は通信が要らないので、ガードより先に行う
+    requests = _validate_batch_requests(args["requests"])
+    meta = writable(services, args["spreadsheet_id"])
+    res = (
+        services.get("sheets")
+        .spreadsheets()
+        .batchUpdate(spreadsheetId=meta["id"], body={"requests": requests})
+        .execute()
+    )
+    # addBanding などで作られた ID を後で使えるよう、replies を返す
+    return {"replies": res.get("replies", [])}
+
+
 TOOLS = [
     Tool(
         name="sheets_get_metadata",
@@ -234,6 +391,41 @@ TOOLS = [
         description="スプレッドシートにシート（タブ）を追加する。対象は自分が所有するマイドライブのファイルに限る。",
         input_schema=obj({"spreadsheet_id": _SPREADSHEET_ID, "title": _SHEET_TITLE}, ["spreadsheet_id", "title"]),
         handler=sheets_add_sheet,
+        read_only=False,
+        guard=GUARD_MYDRIVE,
+    ),
+    Tool(
+        name="sheets_batch_update",
+        title="書式・並べ替え・置換",
+        description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換を行う。"
+        "対象は自分が所有するマイドライブのファイルに限る。"
+        "requests にはリクエストの配列を JSON 文字列で渡す（" + str(_MAX_BATCH_REQUESTS) + " 件まで）。"
+        "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"
+        "範囲は GridRange（sheetId と 0 始まり・終わりを含まない行・列の番号）で指定し、"
+        "sheetId は sheets_get_metadata で取得する。"
+        "repeatCell の fields は userEnteredFormat で始まる項目だけ、"
+        "updateSheetProperties の fields は gridProperties.frozenRowCount・gridProperties.frozenColumnCount・tabColorStyle だけ、"
+        "updateDimensionProperties の fields は pixelSize だけを指定できる。"
+        "repeatCell での値（userEnteredValue）の書き込みは拒否される（値は sheets_write_range で書き込む）。"
+        "外部 URL にアクセスする " + "・".join(_EXTERNAL_FETCH_FUNCTIONS) + " を含むリクエストは拒否される。"
+        "mergeCells は左上以外のセルの値を消すため、値のない範囲か、消えてよいことを確かめてから使う。"
+        "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
+        input_schema=obj(
+            {
+                "spreadsheet_id": _SPREADSHEET_ID,
+                "requests": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": _MAX_BATCH_TEXT,
+                    "description": "リクエストの配列の JSON 文字列"
+                    '（例: [{"repeatCell": {"range": {"sheetId": 0, "endRowIndex": 1}, '
+                    '"cell": {"userEnteredFormat": {"textFormat": {"bold": true}}}, '
+                    '"fields": "userEnteredFormat.textFormat.bold"}}]）',
+                },
+            },
+            ["spreadsheet_id", "requests"],
+        ),
+        handler=sheets_batch_update,
         read_only=False,
         guard=GUARD_MYDRIVE,
     ),
