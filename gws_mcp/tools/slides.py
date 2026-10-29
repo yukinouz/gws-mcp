@@ -1,6 +1,6 @@
 """スライド ツール。
 
-- 読み取り: 各スライドのテキストを取得できる
+- 読み取り: 各スライドのテキストを取得できる。オブジェクト ID・位置・大きさ付きでも取得できる
 - 書き込み: 新規作成と、自分が所有するマイドライブのファイルへのスライド追加・一括置換ができる
 - できないこと: 削除、共有ドライブや他人のファイルへの書き込み
 """
@@ -34,21 +34,174 @@ def _page_texts(elements: list) -> list[str]:
     return out
 
 
+# 1pt あたりの EMU。API の大きさと位置は EMU で返るため、読みやすい pt に直す
+_EMU_PER_PT = 12_700
+# ページ要素の種類と表示名。図形（shape）と表・グループは中身も出すため別に扱う
+_ELEMENT_LABELS = {
+    "image": "画像",
+    "video": "動画",
+    "line": "線",
+    "sheetsChart": "グラフ",
+    "wordArt": "ワードアート",
+    "speakerSpotlight": "スピーカー スポットライト",
+}
+
+
+def _pt(dimension: dict | None, unit: str | None = None) -> float:
+    """Dimension（magnitude と unit）か、unit を別に持つ数値を pt に直す。"""
+    if isinstance(dimension, dict):
+        magnitude, unit = dimension.get("magnitude", 0), dimension.get("unit")
+    else:
+        magnitude = dimension or 0
+    return magnitude if unit == "PT" else magnitude / _EMU_PER_PT
+
+
+def _num(value: float) -> str:
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def _geometry(el: dict, in_group: bool) -> str:
+    """位置と見た目の大きさ（拡大・せん断を反映した外接矩形）を pt で返す。
+
+    LLM が新しい図形を置く場所や、既存の図形の大きさを決めるため。
+    グループ内の要素の位置はグループ基準で返るため、そう明記する。
+    """
+    t = el.get("transform")
+    # API は 0 の値を省略して返す。transform 自体がなければ移動も拡大もない
+    if t is None:
+        t = {"scaleX": 1, "scaleY": 1}
+    unit = t.get("unit")
+    x, y = _pt(t.get("translateX"), unit), _pt(t.get("translateY"), unit)
+    label = "グループ基準の位置" if in_group else "位置"
+    out = f" {label}({_num(x)},{_num(y)}pt)"
+    size = el.get("size")
+    if size:
+        w, h = _pt(size.get("width")), _pt(size.get("height"))
+        width = abs(t.get("scaleX", 0) * w) + abs(t.get("shearX", 0) * h)
+        height = abs(t.get("scaleY", 0) * h) + abs(t.get("shearY", 0) * w)
+        out += f" 大きさ({_num(width)}×{_num(height)}pt)"
+    return out
+
+
+def _span(el: dict) -> str:
+    # API は 0 の startIndex を省略して返す
+    return f"[{el.get('startIndex', 0)}-{el.get('endIndex', 0)})"
+
+
+def _run_text(te: dict) -> str:
+    if "textRun" in te:
+        return te["textRun"].get("content", "").rstrip("\n")
+    return "[自動テキスト]" if "autoText" in te else ""
+
+
+def _paragraphs(text: dict | None) -> list[tuple[dict, list]]:
+    """テキストの要素を、段落の目印（paragraphMarker）と、その段落の文字の範囲の組に分ける。"""
+    paragraphs = []
+    for te in (text or {}).get("textElements", []):
+        if "paragraphMarker" in te:
+            paragraphs.append((te, []))
+        elif paragraphs:
+            paragraphs[-1][1].append(te)
+    return paragraphs
+
+
+def _text_structure(text: dict | None, indent: str) -> list[str]:
+    """図形や表のセルのテキストを、段落ごとの位置付きの行にする。
+
+    文字の範囲（startIndex〜endIndex）は API の値をそのまま返し、LLM が文字数を数えてずれるのを防ぐ。
+    書式が混ざる段落は、文字の範囲（textRun）ごとの位置も続けて出す。
+    """
+    lines = []
+    for marker, runs in _paragraphs(text):
+        bullet = marker["paragraphMarker"].get("bullet")
+        level = f"箇条書き(階層{bullet.get('nestingLevel', 0)}) " if bullet is not None else ""
+        body = "".join(_run_text(r) for r in runs) or "（空行）"
+        lines.append(f"{indent}{_span(marker)} {level}{body}")
+        if len(runs) > 1:
+            lines += [f"{indent}  {_span(r)} {_run_text(r) or '（改行）'}" for r in runs]
+    return lines
+
+
+def _head(el: dict, indent: str, in_group: bool, kind: str, detail: str = "") -> str:
+    return f"{indent}{kind} {el.get('objectId')}{detail}{_geometry(el, in_group)}"
+
+
+def _elements_structure(elements: list, indent: str = "", in_group: bool = False) -> list[str]:
+    """ページ要素を、オブジェクト ID・種類・位置と大きさ・テキストの位置付きの行にする。
+
+    スライドの編集リクエストはオブジェクト ID で対象を指すため。
+    """
+    lines = []
+    for el in elements or []:
+        if "shape" in el:
+            shape = el["shape"]
+            shape_type = f" {shape['shapeType']}" if shape.get("shapeType") else ""
+            placeholder = (shape.get("placeholder") or {}).get("type")
+            extra = f" プレースホルダー: {placeholder}" if placeholder else ""
+            lines.append(_head(el, indent, in_group, "図形", shape_type) + extra)
+            lines.extend(_text_structure(shape.get("text"), indent + "  "))
+        elif "table" in el:
+            table = el["table"]
+            lines.append(_head(el, indent, in_group, "表", f" {table.get('rows', 0)}行×{table.get('columns', 0)}列"))
+            for r, row in enumerate(table.get("tableRows", [])):
+                for c, cell in enumerate(row.get("tableCells", [])):
+                    lines.append(f"{indent}  セル({r},{c})")
+                    lines.extend(_text_structure(cell.get("text"), indent + "    "))
+        elif "elementGroup" in el:
+            lines.append(_head(el, indent, in_group, "グループ"))
+            lines.extend(_elements_structure(el["elementGroup"].get("children", []), indent + "  ", True))
+        else:
+            kind = next((k for k in _ELEMENT_LABELS if k in el), None)
+            lines.append(_head(el, indent, in_group, _ELEMENT_LABELS.get(kind, "要素")))
+    return lines
+
+
+def _notes_shape(slide: dict) -> tuple[str | None, dict | None]:
+    """スピーカーノートの図形の ID と、その図形を返す。"""
+    notes_page = (slide.get("slideProperties") or {}).get("notesPage") or {}
+    notes_id = (notes_page.get("notesProperties") or {}).get("speakerNotesObjectId")
+    shape = next(
+        (el["shape"] for el in notes_page.get("pageElements", []) if el.get("objectId") == notes_id and "shape" in el),
+        None,
+    )
+    return notes_id, shape
+
+
+def _slides_structure(pres: dict) -> list[str]:
+    layouts = {lay.get("objectId"): (lay.get("layoutProperties") or {}) for lay in pres.get("layouts", [])}
+    parts = []
+    for i, slide in enumerate(pres.get("slides", []), 1):
+        layout = layouts.get((slide.get("slideProperties") or {}).get("layoutObjectId"), {}).get("name")
+        layout_text = f", レイアウト: {layout}" if layout else ""
+        parts.append(f"\n## スライド {i}（objectId: {slide.get('objectId')}{layout_text}）")
+        parts.extend(_elements_structure(slide.get("pageElements", [])))
+        notes_id, shape = _notes_shape(slide)
+        if notes_id:
+            # 空のノートにも書き込めるよう、ID は中身がなくても出す
+            parts.append(f"（スピーカーノート objectId: {notes_id}）")
+            parts.extend(_text_structure((shape or {}).get("text"), "  "))
+    parts.append("\n## レイアウト（createSlide の slideLayoutReference.layoutId に使う）")
+    parts.extend(
+        f"{lay_id} {props.get('name', '')}「{props.get('displayName', '')}」" for lay_id, props in layouts.items()
+    )
+    size = pres.get("pageSize") or {}
+    if size:
+        parts.append(f"\nページの大きさ {_num(_pt(size.get('width')))}×{_num(_pt(size.get('height')))}pt")
+    return parts
+
+
 def slides_read(services, args):
     pres = services.get("slides").presentations().get(presentationId=args["presentation_id"]).execute()
     parts = [f"# {pres.get('title')}"]
+    if args.get("format") == "structure":
+        return "\n".join(parts + _slides_structure(pres))
     for i, slide in enumerate(pres.get("slides", []), 1):
         parts.append(f"\n## スライド {i}（objectId: {slide.get('objectId')}）")
         parts.extend(_page_texts(slide.get("pageElements", [])))
-        notes_page = (slide.get("slideProperties") or {}).get("notesPage") or {}
-        notes_id = (notes_page.get("notesProperties") or {}).get("speakerNotesObjectId")
-        notes = [
-            _text_of(el["shape"].get("text")).strip()
-            for el in notes_page.get("pageElements", [])
-            if el.get("objectId") == notes_id and "shape" in el
-        ]
-        if any(notes):
-            parts.append("（スピーカーノート）" + "\n".join(n for n in notes if n))
+        _, shape = _notes_shape(slide)
+        note = _text_of((shape or {}).get("text")).strip()
+        if note:
+            parts.append("（スピーカーノート）" + note)
     return "\n".join(parts)
 
 
@@ -111,8 +264,22 @@ TOOLS = [
     Tool(
         name="slides_read",
         title="スライドを読む",
-        description="プレゼンテーションの各スライドのテキスト（図形・表・スピーカーノート）を取得する。",
-        input_schema=obj({"presentation_id": _PRESENTATION_ID}, ["presentation_id"]),
+        description="プレゼンテーションの各スライドのテキスト（図形・表・スピーカーノート）を取得する。"
+        "format に structure を指定すると、ページ要素（図形・表・画像・グループなど）ごとに objectId・種類・"
+        "位置と見た目の大きさ（pt）・プレースホルダーの種類と、テキストの段落ごとの位置 [startIndex-endIndex)"
+        "（終わりを含まない）・箇条書きの階層を返す。スピーカーノートの objectId、レイアウトの一覧、ページの大きさも返す。"
+        "slides_batch_update で対象を指定する前に使う。",
+        input_schema=obj(
+            {
+                "presentation_id": _PRESENTATION_ID,
+                "format": {
+                    "type": "string",
+                    "enum": ["text", "structure"],
+                    "description": "text（既定・テキストのみ）または structure（ID・位置・大きさ付き）",
+                },
+            },
+            ["presentation_id"],
+        ),
         handler=slides_read,
         read_only=True,
     ),

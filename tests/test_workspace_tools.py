@@ -851,6 +851,88 @@ class DocsSlidesReadTest(unittest.TestCase):
         text = call(s, "slides_read", {"presentation_id": FILE_ID})["content"][0]["text"]
         self.assertIn("表紙タイトル", text)
 
+    def test_スライドの構造表示ではIDと位置と大きさを返す(self):
+        def emu(pt):
+            return {"magnitude": pt * 12_700, "unit": "EMU"}
+
+        s = FakeServices()
+        s.slides_presentations.get.return_value.execute.return_value = {
+            "title": "提案",
+            "pageSize": {"width": emu(720), "height": emu(405)},
+            "layouts": [{"objectId": "l_2", "layoutProperties": {"name": "TITLE_AND_BODY", "displayName": "タイトルと本文"}}],
+            "slides": [
+                {
+                    "objectId": "p1",
+                    "slideProperties": {
+                        "layoutObjectId": "l_2",
+                        "notesPage": {
+                            "notesProperties": {"speakerNotesObjectId": "n1"},
+                            "pageElements": [{"objectId": "n1", "shape": {"shapeType": "TEXT_BOX"}}],
+                        },
+                    },
+                    "pageElements": [
+                        {
+                            "objectId": "t1",
+                            "size": {"width": emu(300), "height": emu(50)},
+                            "transform": {"scaleX": 2, "scaleY": 1, "translateX": 40 * 12_700, "translateY": 30 * 12_700, "unit": "EMU"},
+                            "shape": {
+                                "shapeType": "TEXT_BOX",
+                                "placeholder": {"type": "TITLE"},
+                                "text": {
+                                    "textElements": [
+                                        {"endIndex": 7, "paragraphMarker": {}},
+                                        {"endIndex": 3, "textRun": {"content": "四半期"}},
+                                        {"startIndex": 3, "endIndex": 7, "textRun": {"content": "の振り返\n"}},
+                                        {"startIndex": 7, "endIndex": 10, "paragraphMarker": {"bullet": {"nestingLevel": 1}}},
+                                        {"startIndex": 7, "endIndex": 10, "textRun": {"content": "売上\n"}},
+                                    ]
+                                },
+                            },
+                        },
+                        {
+                            "objectId": "tb1",
+                            "table": {
+                                "rows": 1,
+                                "columns": 1,
+                                "tableRows": [{"tableCells": [{"text": {"textElements": [
+                                    {"endIndex": 3, "paragraphMarker": {}},
+                                    {"endIndex": 3, "textRun": {"content": "項目\n"}},
+                                ]}}]}],
+                            },
+                        },
+                        {"objectId": "img1", "image": {}, "transform": {"scaleX": 1, "scaleY": 1, "translateX": 10, "unit": "PT"}},
+                        {
+                            "objectId": "g1",
+                            "elementGroup": {"children": [{"objectId": "c1", "line": {}, "transform": {"translateY": 5, "unit": "PT"}}]},
+                        },
+                    ],
+                }
+            ],
+        }
+        text = call(s, "slides_read", {"presentation_id": FILE_ID, "format": "structure"})["content"][0]["text"]
+        for expected in (
+            "## スライド 1（objectId: p1, レイアウト: TITLE_AND_BODY）",
+            "図形 t1 TEXT_BOX 位置(40,30pt) 大きさ(600×50pt) プレースホルダー: TITLE",
+            "  [0-7) 四半期の振り返",
+            "    [0-3) 四半期",
+            "    [3-7) の振り返",
+            "  [7-10) 箇条書き(階層1) 売上",
+            "表 tb1 1行×1列 位置(0,0pt)",
+            "    [0-3) 項目",
+            "画像 img1 位置(10,0pt)",
+            "グループ g1 位置(0,0pt)",
+            "  線 c1 グループ基準の位置(0,5pt)",
+            "（スピーカーノート objectId: n1）",
+            "l_2 TITLE_AND_BODY「タイトルと本文」",
+            "ページの大きさ 720×405pt",
+        ):
+            self.assertIn(expected, text)
+        # 段落が 1 つの範囲だけなら、範囲ごとの行は出さない
+        self.assertNotIn("    [7-10) 売上", text)
+        plain = call(s, "slides_read", {"presentation_id": FILE_ID})["content"][0]["text"]
+        self.assertNotIn("objectId: t1", plain)
+        self.assertIn("四半期の振り返", plain)
+
 
 if __name__ == "__main__":
     unittest.main()
