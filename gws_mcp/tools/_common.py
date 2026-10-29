@@ -1,12 +1,16 @@
 """ツール定義で共通に使う部品。"""
 
 import json
+import re
 
 from gws_mcp.guard import FILE_ID_PATTERN, assert_writable_file
 from gws_mcp.tools import ToolError
 
 # batchUpdate のリクエストを拒否したときのエラー文の書き出し
 BATCH_REJECTED = "リクエストに問題があるため、何も変更していません。"
+
+# リンク（Link.url）に許すスキーム。表示されるだけでクリックしない限り何も送られないため、Web のリンクは許可する
+_LINK_URL_RE = re.compile(r"https?://", re.IGNORECASE)
 
 
 def obj(properties: dict, required: list | None = None) -> dict:
@@ -71,3 +75,27 @@ def parse_batch_requests(text: str, allowed: frozenset, max_requests: int) -> li
             + "、".join(problems)
         )
     return requests
+
+
+def url_problems(value, path: str, blocked_keys: dict) -> list:
+    """入れ子の中の、拒否するキーと url を探し、問題の説明を返す。
+
+    blocked_keys は Google が取りに行く URL や別ファイルの ID を表すキーと、その説明。
+    本文を URL に埋め込んで外部に送れるため、どこにあっても拒否する。url（リンク）は http(s) だけ許可する。
+    種類の許可リストをすり抜ける指定も拾えるよう、リクエストの種類ではなくキーの名前で探す。
+    入れ子が深くても再帰の上限に当たらないよう、スタックでたどる。
+    """
+    problems, stack = [], [(value, path)]
+    while stack:
+        v, p = stack.pop()
+        if isinstance(v, dict):
+            for k, child in v.items():
+                if k in blocked_keys:
+                    problems.append(f"{p}.{k}: {blocked_keys[k]}")
+                elif k == "url" and not (isinstance(child, str) and _LINK_URL_RE.match(child)):
+                    problems.append(f"{p}.{k}: リンクは http:// か https:// で始まる URL にしてください")
+                else:
+                    stack.append((child, f"{p}.{k}"))
+        elif isinstance(v, list):
+            stack.extend((child, f"{p}[{i}]") for i, child in enumerate(v))
+    return problems
