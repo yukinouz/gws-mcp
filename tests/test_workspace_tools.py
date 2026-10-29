@@ -797,22 +797,33 @@ class DocsSlidesReadTest(unittest.TestCase):
             {"startIndex": 1, "endIndex": 3, "tableOfContents": {"content": []}},
             {
                 "startIndex": 3,
-                "endIndex": 10,
+                "endIndex": 9,
                 "paragraph": {
                     "elements": [
                         {"startIndex": 3, "endIndex": 5, "textRun": {"content": "図:"}},
                         {"startIndex": 5, "endIndex": 6, "inlineObjectElement": {"inlineObjectId": "i1"}},
-                        {"startIndex": 6, "endIndex": 10, "textRun": {"content": "太字\n", "textStyle": {"bold": True}}},
+                        {"startIndex": 6, "endIndex": 9, "textRun": {"content": "太字\n", "textStyle": {"bold": True}}},
                     ]
                 },
             },
-            {"startIndex": 10, "endIndex": 11, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+            {"startIndex": 9, "endIndex": 10, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+            {
+                "startIndex": 10,
+                "endIndex": 14,
+                "paragraph": {
+                    "elements": [
+                        {"startIndex": 10, "endIndex": 13, "textRun": {"content": "リンク", "textStyle": {"link": {}}}},
+                        {"startIndex": 13, "endIndex": 14, "textRun": {"content": "\n"}},
+                    ]
+                },
+            },
         ]
         s.docs_documents.get.return_value.execute.return_value = {"title": "d", "tabs": [{"documentTab": {"body": {"content": content}}}]}
         text = call(s, "docs_read", {"document_id": FILE_ID, "format": "structure"})["content"][0]["text"]
         self.assertIn("[1-3) 目次", text)
-        self.assertIn("[3-10) NORMAL_TEXT 図:[画像]太字\n  [3-5) 図:\n  [5-6) [画像]\n  [6-10) 太字\n", text)
-        self.assertIn("[10-11) NORMAL_TEXT （空行）", text)
+        self.assertIn("[3-9) NORMAL_TEXT 図:[画像]太字\n  [3-5) 図:\n  [5-6) [画像]\n  [6-9) 太字\n", text)
+        self.assertIn("[9-10) NORMAL_TEXT （空行）", text)
+        self.assertIn("[10-14) NORMAL_TEXT リンク\n  [10-13) リンク\n  [13-14) （改行）\n", text)
 
     def test_構造表示では複数タブのタブIDを返す(self):
         s = FakeServices()

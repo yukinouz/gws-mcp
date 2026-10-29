@@ -125,7 +125,8 @@ def _paragraph_structure(el: dict, indent: str) -> list[str]:
     text = "".join(_element_text(pe) for pe in elements) or "（空行）"
     lines = [f"{indent}{_span(el)} {style} {text}"]
     if len(elements) > 1:
-        lines += [f"{indent}  {_span(pe)} {_element_text(pe)}" for pe in elements]
+        # 改行だけの要素は空白で終わり、何もない位置と見分けにくいため目印を出す
+        lines += [f"{indent}  {_span(pe)} {_element_text(pe) or '（改行）'}" for pe in elements]
     return lines
 
 
