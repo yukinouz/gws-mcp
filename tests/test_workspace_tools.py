@@ -341,10 +341,9 @@ class SheetsBatchUpdateTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]), {"replies": [{}] * len(requests)})
 
     def test_許可リスト外のリクエストは拒否する(self):
-        for kind in ("deleteSheet", "updateCells", "appendCells", "pasteData",
-                     "copyPaste", "cutPaste", "addProtectedRange", "updateProtectedRange",
-                     "addDataSource", "refreshDataSource", "addNamedRange", "updateSpreadsheetProperties",
-                     "insertComment"):
+        for kind in ("deleteSheet", "deleteTable", "updateCells", "appendCells", "pasteData",
+                     "addProtectedRange", "updateProtectedRange", "addDataSource", "refreshDataSource",
+                     "updateSpreadsheetProperties", "insertComment"):
             with self.subTest(kind=kind):
                 self._assert_rejected([{kind: {}}], f"{kind} は使えません")
 
@@ -372,6 +371,21 @@ class SheetsBatchUpdateTest(unittest.TestCase):
             {"insertRange": {"range": {"sheetId": 0, "endRowIndex": 1}, "shiftDimension": "ROWS"}},
             {"deleteRange": {"range": {"sheetId": 0, "endRowIndex": 1}, "shiftDimension": "ROWS"}},
             {"duplicateSheet": {"sourceSheetId": 0, "newSheetName": "コピー"}},
+        ]
+        result, batch = self._call(requests)
+        self.assertFalse(result["isError"], result)
+        batch.assert_called_once()
+
+    def test_フィルタ表示や名前付き範囲などの整理とファイル内のコピーは通す(self):
+        grid = {"sheetId": 0, "endRowIndex": 3, "endColumnIndex": 2}
+        requests = [
+            {"addFilterView": {"filter": {"title": "未完了", "range": grid}}},
+            {"addNamedRange": {"namedRange": {"name": "売上", "range": grid}}},
+            {"addDimensionGroup": {"range": {"sheetId": 0, "dimension": "ROWS", "startIndex": 1, "endIndex": 3}}},
+            {"addTable": {"table": {"name": "表1", "range": grid}}},
+            {"copyPaste": {"source": grid, "destination": {**grid, "startRowIndex": 5}, "pasteType": "PASTE_NORMAL"}},
+            {"deleteDuplicates": {"range": grid}},
+            {"trimWhitespace": {"range": grid}},
         ]
         result, batch = self._call(requests)
         self.assertFalse(result["isError"], result)
@@ -701,6 +715,8 @@ class DocsBatchUpdateTest(unittest.TestCase):
             {"createParagraphBullets": {"range": {"startIndex": 6, "endIndex": 21}, "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"}},
             {"insertTable": {"rows": 2, "columns": 2, "endOfSegmentLocation": {}}},
             {"deleteContentRange": {"range": {"startIndex": 30, "endIndex": 40}}},
+            {"createDropdownDefinition": {"dropdownDefinition": {"options": [{"displayText": "未着手"}]}}},
+            {"insertDropdown": {"dropdownDefinitionId": "d.1", "location": {"index": 1}}},
             _link({"url": "https://example.com/a?b=c"}),
             _link({"heading": {"id": "h.1", "tabId": "t.0"}}),
         ]

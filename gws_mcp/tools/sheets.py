@@ -85,6 +85,32 @@ _BATCH_ALLOWED = frozenset(
         "insertRange",
         "deleteRange",
         "duplicateSheet",
+        # 見た目と整理。フィルタ表示・名前付き範囲・行と列のグループ化・スライサー・テーブル
+        "addFilterView",
+        "updateFilterView",
+        "duplicateFilterView",
+        "deleteFilterView",
+        "addNamedRange",
+        "updateNamedRange",
+        "deleteNamedRange",
+        "addDimensionGroup",
+        "updateDimensionGroup",
+        "deleteDimensionGroup",
+        "addSlicer",
+        "updateSlicerSpec",
+        "updateConditionalFormatRule",
+        "deleteConditionalFormatRule",
+        "updateBanding",
+        "deleteBanding",
+        # テーブルの削除（deleteTable）は、セルのデータまで消えるかを API の説明で確かめられないため含めない
+        "addTable",
+        "updateTable",
+        # ファイルの中のデータの移動と整理
+        "copyPaste",
+        "cutPaste",
+        "autoFill",
+        "deleteDuplicates",
+        "trimWhitespace",
     }
 )
 # 許可した種類の中にも入れられる、外部データにつながるキー。
@@ -432,7 +458,7 @@ TOOLS = [
         name="sheets_batch_update",
         title="書式・並べ替え・置換・グラフ",
         description="Sheets API の spreadsheets.batchUpdate で書式の設定・並べ替え・検索と置換・グラフの作成と編集、"
-        "行・列の挿入と削除を行う。"
+        "行・列の挿入と削除、フィルタ表示・名前付き範囲・テーブルなどの整理、ファイルの中のコピーと貼り付けを行う。"
         "対象は自分が所有するマイドライブのファイルに限る。"
         "requests にはリクエストの配列を JSON 文字列で渡す（" + str(_MAX_BATCH_REQUESTS) + " 件まで）。"
         "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"

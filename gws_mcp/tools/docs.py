@@ -67,6 +67,12 @@ _BATCH_ALLOWED = frozenset(
         "createNamedRange",
         "deleteNamedRange",
         "replaceNamedRangeContent",
+        # プルダウン
+        "createDropdownDefinition",
+        "updateDropdownDefinitionProperties",
+        "insertDropdown",
+        "updateDropdownProperties",
+        "deleteDropdownDefinition",
     }
 )
 _MAX_BATCH_REQUESTS = 200
