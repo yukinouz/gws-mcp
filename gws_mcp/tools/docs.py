@@ -18,8 +18,9 @@ _DOCUMENT_ID = file_id("ドキュメントの ID")
 _TEXT = {"type": "string", "minLength": 1, "maxLength": 200_000}
 
 # docs_batch_update で使えるリクエスト。ドキュメントの中で完結する編集だけを含める。
-# 外部 URL の画像を取りに行くもの（insertInlineImage・replaceImage）、第三者に通知が届くものや
-# 他人の提案を確定させるもの（コメント・insertPerson・提案の承認）、タブごとの削除は含めない
+# Google が外部 URL を取りに行くもの（insertInlineImage・replaceImage・insertRichLink）、第三者に通知が届くものや
+# 他人の提案を確定させるもの（insertComment などのコメント・insertPerson・acceptSuggestion などの提案）、
+# タブごとの削除（deleteTab）は含めない
 _BATCH_ALLOWED = frozenset(
     {
         # 文字と段落
@@ -51,6 +52,9 @@ _BATCH_ALLOWED = frozenset(
         "updateSectionStyle",
         "createHeader",
         "createFooter",
+        "deleteHeader",
+        "deleteFooter",
+        "deletePositionedObject",
         "createFootnote",
         "addDocumentTab",
         "updateDocumentTabProperties",
@@ -81,8 +85,48 @@ def _elements_text(elements: list) -> str:
     return "".join(out)
 
 
+# 段落の中の文字以外の要素。どれも位置を 1 以上使うため、目印を出して段落の中の位置がずれないようにする
+_ELEMENT_LABELS = {
+    "inlineObjectElement": "画像",
+    "footnoteReference": "脚注",
+    "horizontalRule": "横線",
+    "pageBreak": "改ページ",
+    "columnBreak": "段区切り",
+    "autoText": "自動テキスト",
+    "person": "人物",
+    "richLink": "リッチリンク",
+    "dateElement": "日付",
+    "equation": "数式",
+}
+
+
 def _span(el: dict) -> str:
+    # API は 0 の startIndex を省略して返す
     return f"[{el.get('startIndex', 0)}-{el.get('endIndex', 0)})"
+
+
+def _element_text(pe: dict) -> str:
+    if "textRun" in pe:
+        return pe["textRun"].get("content", "").rstrip("\n")
+    kind = next((k for k in pe if k not in ("startIndex", "endIndex")), "不明")
+    return f"[{_ELEMENT_LABELS.get(kind, kind)}]"
+
+
+def _paragraph_structure(el: dict, indent: str) -> list[str]:
+    """段落を 1 行にする。書式や文字以外の要素が混ざる段落は、要素ごとの位置も続けて出す。
+
+    段落の一部（単語だけ太字など）を指定するとき、要素の境界をそのまま範囲に使えるようにするため。
+    """
+    para = el["paragraph"]
+    style = (para.get("paragraphStyle") or {}).get("namedStyleType", "NORMAL_TEXT")
+    if "bullet" in para:
+        style += f" 箇条書き(階層{para['bullet'].get('nestingLevel', 0)})"
+    elements = para.get("elements", [])
+    text = "".join(_element_text(pe) for pe in elements) or "（空行）"
+    lines = [f"{indent}{_span(el)} {style} {text}"]
+    if len(elements) > 1:
+        lines += [f"{indent}  {_span(pe)} {_element_text(pe)}" for pe in elements]
+    return lines
 
 
 def _elements_structure(elements: list, indent: str = "") -> list[str]:
@@ -94,12 +138,7 @@ def _elements_structure(elements: list, indent: str = "") -> list[str]:
     lines = []
     for el in elements or []:
         if "paragraph" in el:
-            para = el["paragraph"]
-            style = (para.get("paragraphStyle") or {}).get("namedStyleType", "NORMAL_TEXT")
-            if "bullet" in para:
-                style += f" 箇条書き(階層{para['bullet'].get('nestingLevel', 0)})"
-            text = "".join((pe.get("textRun") or {}).get("content", "") for pe in para.get("elements", []))
-            lines.append(f"{indent}{_span(el)} {style} {text.rstrip(chr(10))}")
+            lines += _paragraph_structure(el, indent)
         elif "table" in el:
             table = el["table"]
             lines.append(f"{indent}{_span(el)} 表 {table.get('rows', 0)}行×{table.get('columns', 0)}列")
@@ -250,8 +289,10 @@ TOOLS = [
         name="docs_read",
         title="ドキュメントを読む",
         description="ドキュメントの本文をテキストで取得する（表は | 区切り、複数タブはタブごとに見出しを付ける）。"
-        "format に structure を指定すると、段落ごとに位置 [startIndex-endIndex)（終わりを含まない）・"
-        "段落の種類（HEADING_2 など）・箇条書きかどうかを返す。docs_batch_update で範囲を指定する前に使う。",
+        "format に structure を指定すると、本文（ヘッダー・フッター・脚注は含まない）の段落ごとに"
+        "位置 [startIndex-endIndex)（終わりを含まない・UTF-16 単位）・段落の種類（HEADING_2 など）・"
+        "箇条書きの階層（0 始まり）を返す。書式や画像などが混ざる段落は、要素ごとの位置も続けて返す。"
+        "docs_batch_update で範囲を指定する前に使う。",
         input_schema=obj(
             {
                 "document_id": _DOCUMENT_ID,
@@ -314,10 +355,11 @@ TOOLS = [
         "使えるリクエスト: " + " ".join(sorted(_BATCH_ALLOWED)) + "。"
         "範囲や位置は docs_read の format: structure で得た index で指定する（複数タブなら tabId も指定する）。"
         "リクエストは配列の順に適用され、挿入や削除で後ろの index がずれるため、後ろの位置から順に並べる。"
+        "本文やセルの最後の段落の改行は削除できないため、最後の段落を消すときは endIndex から 1 を引く。"
         "見出しは updateParagraphStyle の paragraphStyle.namedStyleType（HEADING_1〜6 など）と fields: namedStyleType、"
         "箇条書きは createParagraphBullets で作る。"
         "リンク（updateTextStyle の textStyle.link）は http:// か https:// の url、または文書内の heading・bookmark・tabId に限る。"
-        "画像の挿入・差し替え、コメント、人物のメンション、提案の承認、タブの削除はできない。"
+        "画像の挿入・差し替え、リッチリンク、コメント、人物のメンション、提案の承認・却下、タブの削除はできない。"
         "1件でも不正なリクエストがあれば、何も変更せずに全体を拒否する。",
         input_schema=obj(
             {
